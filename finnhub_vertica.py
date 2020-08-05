@@ -1,17 +1,19 @@
-
+#%%
 
 ### https://finnhub.io/docs/api
 ### https://github.com/Finnhub-Stock-API/finnhub-python
 ### https://github.com/vertica/vertica-python
-# pip3 install finnhub-python vertica-python verticapy
+# pip3 install finnhub-python vertica-python verticapy maya
 
 # https://www.alphavantage.co/support/#api-key
+
 # O0LDS7A14EH1HDNP
 # https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=PETR4.SA&apikey=O0LDS7A14EH1HDNP
 
 #https://tradingeconomics.com/brazil/stock-market
 
 import time
+import maya
 import requests
 import datetime
 import vertica_python
@@ -38,28 +40,44 @@ def connectVertica():
     # simple connection, with manual close
     return vertica_python.connect(**conn_info)
 
-def query_symbol_data(symbol):
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&apikey=O0LDS7A14EH1HDNP&outputsize=full&symbol={symbol}"
+# https://www.alphavantage.co/documentation/
+# https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=EUR&to_symbol=BRL&interval=5min&apikey=O0LDS7A14EH1HDNP
+
+# https://www.alphavantage.co/query?function=DEMA&symbol=CVCB3.SA&interval=daily&time_period=10&series_type=open&apikey=O0LDS7A14EH1HDNP
+# https://www.alphavantage.co/query?function=TEMA&symbol=CVCB3.SA&interval=daily&time_period=10&series_type=open&apikey=O0LDS7A14EH1HDNP
+# https://www.alphavantage.co/query?function=TRIMA&symbol=CVCB3.SA&interval=daily&time_period=10&series_type=open&apikey=O0LDS7A14EH1HDNP
+
+def query_symbol_data(symbol, function="TIME_SERIES_DAILY", compact=True):
+        outputsize = "compact"
+        if not compact: outputsize = "full"
+        url = f"https://www.alphavantage.co/query?function={function}&apikey=O0LDS7A14EH1HDNP&outputsize={outputsize}&symbol={symbol}"
         response = requests.request('GET', url)
         try:
             return response.json()
         except Exception as error:
            print(f"{response} - {str(error)}")
 
+def getDbLastTimestamp(symbol, table_name="daily_prices", column_name="ts"):
+    return cur.execute(f"SELECT MAX(\"{column_name}\") as \"{column_name}\" FROM {table_name} WHERE symbol = '{symbol}';").fetchone()[0]
+
 def load_symbol_daily_data(symbol):
     print(f"loading symbol data: {symbol}")
     cur.execute("CREATE TABLE IF NOT EXISTS daily_prices (ts DATETIME, symbol VARCHAR(15), open NUMERIC(12,4), high NUMERIC(12,4), low NUMERIC(12,4), close NUMERIC(12,4), volume NUMERIC(18) )")
-    resp = query_symbol_data(symbol)
-    print(resp["Meta Data"])
+    resp = query_symbol_data(symbol, "TIME_SERIES_DAILY", True)
+    db_last_ts = getDbLastTimestamp(symbol)
+    print(f"db_last_ts: {db_last_ts}")
     buffer = []
     for ts in resp["Time Series (Daily)"]:
-        data = resp["Time Series (Daily)"][ts]
-        buffer.append( (ts, resp["Meta Data"]["2. Symbol"], data['1. open'], data['2. high'], data['3. low'], data['4. close'], data['5. volume'])  )
-        if len(buffer) == 10000:
-            print(len(buffer))
-            cur.executemany("INSERT INTO daily_prices VALUES (?, ?, ?, ?, ?, ?, ?);", buffer)
-            buffer.clear()
-            time.sleep(3)
+        ts_obj = maya.parse(ts).datetime()
+        if ts_obj.date() > db_last_ts.date():
+            print(f"New Data found: {ts_obj}")
+            data = resp["Time Series (Daily)"][ts]
+            buffer.append( (ts, resp["Meta Data"]["2. Symbol"], data['1. open'], data['2. high'], data['3. low'], data['4. close'], data['5. volume'])  )
+            if len(buffer) == 1000:
+                print(len(buffer))
+                cur.executemany("INSERT INTO daily_prices VALUES (?, ?, ?, ?, ?, ?, ?);", buffer)
+                buffer.clear()
+                time.sleep(3)
     if len(buffer) > 0:
         cur.executemany("INSERT INTO daily_prices VALUES (?, ?, ?, ?, ?, ?, ?);", buffer)
     cur.execute("select do_tm_task('mergeout', 'daily_prices');")
@@ -124,6 +142,7 @@ with connectVertica() as connection:
     for symbol in symbols:
         load_symbol_daily_data(symbol)
         time.sleep(30)
+
         
     
     
