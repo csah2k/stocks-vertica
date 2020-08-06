@@ -41,11 +41,14 @@ def connectVertica():
     return vertica_python.connect(**conn_info)
 
 # https://www.alphavantage.co/documentation/
+
+# https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVCB3.SA&apikey=O0LDS7A14EH1HDNP
 # https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=EUR&to_symbol=BRL&interval=5min&apikey=O0LDS7A14EH1HDNP
 
 # https://www.alphavantage.co/query?function=DEMA&symbol=CVCB3.SA&interval=daily&time_period=10&series_type=open&apikey=O0LDS7A14EH1HDNP
 # https://www.alphavantage.co/query?function=TEMA&symbol=CVCB3.SA&interval=daily&time_period=10&series_type=open&apikey=O0LDS7A14EH1HDNP
 # https://www.alphavantage.co/query?function=TRIMA&symbol=CVCB3.SA&interval=daily&time_period=10&series_type=open&apikey=O0LDS7A14EH1HDNP
+
 
 def query_symbol_data(symbol, function="TIME_SERIES_DAILY", compact=True):
         outputsize = "compact"
