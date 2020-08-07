@@ -10,7 +10,8 @@ from verticapy.connections.connect import *
 from verticapy.learn.linear_model import LinearRegression
 from pandas_datareader import data as web 
 from datetime import datetime as dt
-
+from finnhub import Client
+finnhub_client = Client(api_key="bqu00jvrh5rb3gqqf9q0")
 ONE_DAY = datetime.timedelta(days=1)
 HOLIDAYS_BR = holidays.BR()
 
@@ -18,7 +19,8 @@ conn_info = {'host': '127.0.0.1',
             'port': 5433,
             'user': 'dbadmin',
             'password': 'stocks',
-            'database': 'stocks'}
+            'database': 'stocks',
+            'use_prepared_statements': True}
 
 db_schema = "stocks"
 input_table = "daily_prices"
@@ -90,6 +92,7 @@ def runProcess():
     # ASSURE MAIN TABLE EXISTENCE
     vert_cur.execute(f"CREATE TABLE IF NOT EXISTS \"{db_schema}\".\"{input_table}\" (ts DATETIME, symbol VARCHAR(15), open NUMERIC(12,4), high NUMERIC(12,4), low NUMERIC(12,4), close NUMERIC(12,4), volume NUMERIC(18) )")
 
+
     ### LOAD DATA ###
     #for target_symbol in symbols:
     #    loadHistData(target_symbol)
@@ -112,7 +115,6 @@ def runProcess():
     print("========= FINISHED ========")
     
 
-    
 
 
 def next_business_day(ref_date=datetime.date.today()):
@@ -122,7 +124,9 @@ def next_business_day(ref_date=datetime.date.today()):
     return next_day
 
 def getDbLastTimestamp(symbol, table_name="daily_prices", column_name="ts"):
-    return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM \"{db_schema}\".\"{table_name}\" WHERE symbol = '{symbol}' and close is not null;").fetchone()[0]
+    if table_name.find(f"\"{db_schema}\"") < 0:
+        table_name = f"\"{db_schema}\".\"{table_name}\""        
+    return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM {table_name} WHERE symbol = '{symbol}' and close is not null;").fetchone()[0]
 
 def mergeSimulationData(simulation_table, simulation_result_table):
     return vert_cur.execute(f"MERGE INTO {simulation_table} sim USING {simulation_result_table} res ON sim.ts = res.ts WHEN MATCHED THEN UPDATE SET open = res.open, close = res.close, high = res.high, low = res.low, volume = res.volume WHEN NOT MATCHED THEN INSERT (ts, symbol, open, close, high, low, volume) VALUES (res.ts, res.symbol, res.open, res.close, res.high, res.low, res.volume);").fetchone()
@@ -207,54 +211,42 @@ def generateVariables(tmp, target_symbol, vdf):
             vdf.eval(name = f"{col}_MACD", expr = f"{col}_short_ema - {col}_long_ema")
             vdf.eval(name = f"LAG_{col}_MACD", expr = f"LAG({col}_MACD, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
 
-    # ===================== MATERIALIZE 1º STEP =====================
-    tmp = materializeVdf(tmp, target_symbol, vdf) 
-    
-    # pre-reqs   
-    vdf.eval(name = "roc", expr = "(close - close_D1_N )/ close_D1_1 * 100")
-    vdf.eval(name = "PV", expr = "volume * ((high + low + close) / 3)")
-    vdf.eval(name = "highest_high_1M", expr = "MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "lowest_low_1M", expr = "MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "highest_high_3M", expr = "MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "lowest_low_3M", expr = "MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "_up", expr = "CASE WHEN close > close_D1_1 THEN close - close_D1_1 ELSE 0 END")
-    vdf.eval(name = "_dn", expr = "CASE WHEN close > close_D1_1 THEN 0 ELSE close_D1_1 - close END")
-
-
-    # ===================== MATERIALIZE 2º STEP =====================
-    tmp = materializeVdf(tmp, target_symbol, vdf) 
-
-    # pre-reqs    
-    vdf.eval(name = "_k_1M", expr = "100 * ((close - lowest_low_1M ) / (highest_high_1M - lowest_low_1M))")
-    vdf.eval(name = "_k_3M", expr = "100 * ((close - lowest_low_3M ) / (highest_high_3M - lowest_low_3M ))")
-    vdf.eval(name = "_upavg_1M", expr = "AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "_dnavg_1M", expr = "AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "_upavg_3M", expr = "AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "_dnavg_3M", expr = "AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
 
     #  https://www.investopedia.com/terms/p/pricerateofchange.asp
+    vdf.eval(name = "roc", expr = "(close - close_D1_N )/ close_D1_1 * 100")
     vdf.eval(name = "roc_long_ema", expr = "EXPONENTIAL_MOVING_AVERAGE(roc, 0.075) OVER (PARTITION BY symbol ORDER BY ts)")
     vdf.eval(name = "roc_short_ema", expr = "EXPONENTIAL_MOVING_AVERAGE(roc, 0.15) OVER (PARTITION BY symbol ORDER BY ts)")
 
     # https://www.investopedia.com/terms/v/vwap.asp
+    vdf.eval(name = "PV", expr = "volume * ((high + low + close) / 3)")
     vdf.eval(name = "VWAP", expr = "PV / volume")
 
 
-    # ===================== MATERIALIZE 3º STEP =====================
-    tmp = materializeVdf(tmp, target_symbol, vdf) 
-
     # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
+    vdf.eval(name = "_up", expr = "CASE WHEN close > close_D1_1 THEN close - close_D1_1 ELSE 0 END")
+    vdf.eval(name = "_dn", expr = "CASE WHEN close > close_D1_1 THEN 0 ELSE close_D1_1 - close END")
+
+    vdf.eval(name = "_upavg_1M", expr = "AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
+    vdf.eval(name = "_dnavg_1M", expr = "AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
     vdf.eval(name = "RMI_1M", expr = "100 * ( _upavg_1M / ( _upavg_1M - _dnavg_1M ))")
+    
+    vdf.eval(name = "_upavg_3M", expr = "AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
+    vdf.eval(name = "_dnavg_3M", expr = "AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
     vdf.eval(name = "RMI_3M", expr = "100 * ( _upavg_3M / ( _upavg_3M - _dnavg_3M ))")
 
     # https://www.fmlabs.com/reference/default.htm?url=StochasticOscillator.htm
+    vdf.eval(name = "highest_high_1M", expr = "MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
+    vdf.eval(name = "lowest_low_1M", expr = "MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
+    vdf.eval(name = "_k_1M", expr = "100 * ((close - lowest_low_1M ) / (highest_high_1M - lowest_low_1M))")
     vdf.eval(name = "STOCH_1M", expr = "EXPONENTIAL_MOVING_AVERAGE(_k_1M, 0.15) OVER (PARTITION BY symbol ORDER BY ts)")
+
+    vdf.eval(name = "highest_high_3M", expr = "MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
+    vdf.eval(name = "lowest_low_3M", expr = "MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
+    vdf.eval(name = "_k_3M", expr = "100 * ((close - lowest_low_3M ) / (highest_high_3M - lowest_low_3M ))")    
     vdf.eval(name = "STOCH_3M", expr = "EXPONENTIAL_MOVING_AVERAGE (_k_3M , 0.075) OVER (PARTITION BY symbol ORDER BY ts)")
 
 
-    # ===================== MATERIALIZE 4º STEP =====================
-    tmp = materializeVdf(tmp, target_symbol, vdf) 
-
+    # ===================== LAGS =====================
     for col in input_columns:
         vdf.eval(name = f"LAG_{col}_sma_1W", expr = f"LAG({col}_sma_1W, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
         vdf.eval(name = f"LAG_{col}_sma_1M", expr = f"LAG({col}_sma_1M, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
@@ -270,8 +262,8 @@ def generateVariables(tmp, target_symbol, vdf):
     vdf.eval(name = f"LAG_RMI_1M_close", expr = f"LAG(RMI_1M, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
     vdf.eval(name = f"LAG_RMI_3M_close", expr = f"LAG(RMI_3M, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
     
-    # ===================== MATERIALIZE LAGS =====================
-    tmp = materializeVdf(tmp, target_symbol, vdf) 
+    
+    #tmp = materializeVdf(tmp, target_symbol, vdf) 
     
     # https://www.fmlabs.com/reference/default.htm?url=DI.htm
     #vdf.eval(name = f"_delta_high", expr = f"LAG(high, 1, Null) OVER(PARTITION BY symbol ORDER BY ts) - high")
@@ -348,9 +340,12 @@ def createSimulationData(target_symbol, inpt_table=input_table):
     from_day = getDbLastTimestamp(target_symbol, inpt_table)
     next_day = next_business_day(from_day.date())
     print(f"next_business_day: {next_day}")
+
+    if inpt_table.find(f"\"{db_schema}\"") < 0:
+        inpt_table = f"\"{db_schema}\".\"{inpt_table}\""
     
     null_colums_query = ','.join([f"Null as \"{c}\"" for c in input_columns])
-    input_table_query = f"( (SELECT ts, symbol,{input_colums_query} FROM \"{db_schema}\".\"{inpt_table}\" WHERE symbol = '{target_symbol}' and close is not null) UNION ALL (SELECT '{next_day}'::TIMESTAMP as ts, '{target_symbol}' as symbol,{null_colums_query})  ) \"input_table\""
+    input_table_query = f"( (SELECT ts, symbol,{input_colums_query} FROM {inpt_table} WHERE symbol = '{target_symbol}' and close is not null) UNION ALL (SELECT '{next_day}'::TIMESTAMP as ts, '{target_symbol}' as symbol,{null_colums_query})  ) \"input_table\""
     query_create_tmp = f"CREATE TABLE \"{db_schema}\".\"{tmp}\" as SELECT slice_time as ts, symbol,{input_colums_query_ts} FROM {input_table_query} TIMESERIES slice_time AS '1 day' OVER(PARTITION by symbol ORDER BY ts)"
     vert_cur.execute(query_create_tmp)
     vdf = vDataFrame(f"\"{db_schema}\".\"{tmp}\"")

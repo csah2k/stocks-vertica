@@ -184,7 +184,4 @@ print("stock_symbols loaded")
 #print(finnhub_client.news_sentiment('AAPL'))
 
 
-
-
-
 # %%
