@@ -1,6 +1,9 @@
-create schema stocks 
+drop schema stocks cascade;
+create schema stocks;
 
-select * from stocks.stock_symbols;
+CREATE TABLE IF NOT EXISTS stocks.daily_prices (ts DATETIME, symbol VARCHAR(15), open NUMERIC(12,2), high NUMERIC(12,2), low NUMERIC(12,2), close NUMERIC(12,2), volume NUMERIC(20) );
+
+
 drop table if exists stocks.stock_symbols;
 CREATE TABLE IF NOT EXISTS stocks.stock_symbols (company VARCHAR(50), symbol VARCHAR(10), industry VARCHAR(100), headquarters VARCHAR(100) );
 INSERT INTO stocks.stock_symbols VALUES ('AmBev', 'ABEV3', 'beverages', 'São Paulo');
