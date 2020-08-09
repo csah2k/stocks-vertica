@@ -1,6 +1,7 @@
 #%%
 # pip3 install vertica-python verticapy holidays
 import time
+import logging
 import datetime
 import holidays
 import vertica_python
@@ -18,6 +19,8 @@ finnhub_client = Client(api_key="bqu00jvrh5rb3gqqf9q0")
 ONE_DAY = datetime.timedelta(days=1)
 HOLIDAYS_BR = holidays.BR()
 
+logfile = 'vertica_service.log'
+
 conn_info = {'host': '127.0.0.1',
             'port': 5433,
             'user': 'dbadmin',
@@ -34,24 +37,30 @@ new_auto_connection(conn_info, method = "vertica_python", name = "VerticaDSN")
 change_auto_connection("VerticaDSN")
 
 vertica_connection = vertica_python.connect(**conn_info)
-vert_cur = vertica_connection.cursor()
+#vert_cur = vertica_connection.cursor()
 
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
 
 def runProcess():
+    logging.info("========= STARTING PROCESS ========")
+
+    ## SINGLE THREAD ###
+    for target_symbol in listSymbols():
+        ### LOAD DATA ###
+        loadHistData(target_symbol)
+        time.sleep(1)
 
     ## MULTI_THREAD ##
-    '''
     open_threads = []
-    for target_symbol in symbols:
+    for target_symbol in listSymbols(input_table):
         open_threads.append(executor.submit(processSymbol, target_symbol))
-        time.sleep(10)
+        time.sleep(5)
     for open_thread in open_threads:
         open_thread.result()
-    '''
     
-    for target_symbol in listSymbols():
-        processSymbol(target_symbol)
+    #for target_symbol in listSymbols():
+        #processSymbol(target_symbol)
         #symbol_models = {}
         #for c in output_columns:
         #    m = LinearRegression(f"\"{db_schema}\".\"LR_{symbolToTable(target_symbol)}_{c}\"", solver="CGD")
@@ -62,21 +71,22 @@ def runProcess():
         #    print("Error")
         #input("PRESS ANY KEY TO CONTINUE!")
 
-    print("========= ALL SYMBOLS FINISHED ========")
+    logging.info("========= ALL SYMBOLS FINISHED ========")
     
 
 def processSymbol(target_symbol):
-    #TODO create a vertica cursor for each symbol for multithread
-    ### LOAD DATA ###
-    loadHistData(target_symbol)
+    logging.info(f'Processing symbol {target_symbol}')
     ### TRAIN MODELS  ###   
     models =  trainSymbolModels(target_symbol)
     ### SIMULATE DATA ###
     simulateSymbolData(target_symbol, models, 5)
-    print(f"========= SYMBOL {target_symbol} FINISHED ========")
+    logging.info(f"Symbol {target_symbol} Finished!")
 
 def listSymbols(table_name="stock_symbols"):
-    return [row[0] for row in vert_cur.execute(f"SELECT DISTINCT symbol FROM {getRelation(table_name)} order by 1;").fetchall()]
+    table_name = getRelation(table_name)
+    logging.info(f"Listing symbols from table {table_name}")
+    with vertica_connection.cursor() as vert_cur:
+        return [row[0] for row in vert_cur.execute(f"SELECT DISTINCT symbol FROM {table_name} order by 1;").fetchall()]
 
 def getRelation(table=input_table, schema=db_schema, table_only=False):
     table_search = re.search(r"(\"?(\w+)\"?\.)?\"?(\w+)\"?", table, re.IGNORECASE)
@@ -89,28 +99,33 @@ def next_business_day(ref_date=datetime.date.today()):
     next_day = ref_date + ONE_DAY
     while next_day.weekday() in holidays.WEEKEND or next_day in HOLIDAYS_BR:
         next_day += ONE_DAY
+    logging.info(f"Next business day: {next_day}")
     return next_day
 
-def getDbLastTimestamp(symbol, table_name="daily_prices", column_name="ts"):    
-    return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM {getRelation(table_name)} WHERE symbol = '{symbol}' and close is not null;").fetchone()[0]
+def getDbLastTimestamp(symbol, table_name="daily_prices", column_name="ts"):
+    with vertica_connection.cursor() as vert_cur: 
+        return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM {getRelation(table_name)} WHERE symbol = '{symbol}' and close is not null;").fetchone()[0]
 
 def mergeSimulationData(simulation_table, simulation_result_table):
-    return vert_cur.execute(f"MERGE INTO {getRelation(simulation_table)} sim USING {getRelation(simulation_result_table)} res ON sim.ts = res.ts WHEN MATCHED THEN UPDATE SET open = res.open, close = res.close, high = res.high, low = res.low, volume = res.volume WHEN NOT MATCHED THEN INSERT (ts, symbol, open, close, high, low, volume) VALUES (res.ts, res.symbol, res.open, res.close, res.high, res.low, res.volume);")
+    with vertica_connection.cursor() as vert_cur:
+        return vert_cur.execute(f"MERGE INTO {getRelation(simulation_table)} sim USING {getRelation(simulation_result_table)} res ON sim.ts = res.ts WHEN MATCHED THEN UPDATE SET open = res.open, close = res.close, high = res.high, low = res.low, volume = res.volume WHEN NOT MATCHED THEN INSERT (ts, symbol, open, close, high, low, volume) VALUES (res.ts, res.symbol, res.open, res.close, res.high, res.low, res.volume);")
 
 def dropTable(table_name, cascade=True):
     sql = f"DROP TABLE IF EXISTS {getRelation(table_name)}"
     if cascade: sql = f"{sql} CASCADE;"
-    return vert_cur.execute(sql)
+    with vertica_connection.cursor() as vert_cur:
+        return vert_cur.execute(sql)
 
 def dropView(view_name):
     sql = f"DROP VIEW IF EXISTS {getRelation(view_name)};"
-    return vert_cur.execute(sql)
+    with vertica_connection.cursor() as vert_cur:
+        return vert_cur.execute(sql)
 
 def symbolToTable(symbol):
     return re.sub(r'[^A-Z09]', '', symbol).lower().strip()
 
 def loadHistData(symbol):
-    print(f"Loading {symbol} data from yahoo...")
+    logging.info(f"Loading new data YAHOO! for {symbol}")
     df = web.DataReader(
         symbol,
         'yahoo',
@@ -118,16 +133,17 @@ def loadHistData(symbol):
         dt.now()
     ).reset_index()
 
-    print(df)
     table_name_stg = getRelation(f"stock_data_{symbolToTable(symbol)}")
     dropTable(table_name_stg)
     pandas_to_vertica(df, getRelation(table_name_stg, table_only=True), schema=db_schema)
 
-    query = f"INSERT INTO \"{db_schema}\".\"{input_table}\" SELECT \"Date\"::TIMESTAMP as \"ts\", '{symbol}' as \"symbol\", \"Open\" as \"open\", \"High\" as \"high\", \"Low\" as \"low\", \"Close\" as \"close\", \"Volume\" as \"volume\" FROM {table_name_stg} WHERE \"Volume\" > 0 AND \"Close\" > 0 AND \"Date\" > (select COALESCE(MAX(ts), '1990-01-01') from {getRelation(input_table)} where symbol = '{symbol}') "
-    print(query)
-    vert_cur.execute(query).fetchone()
+    target_table = getRelation(input_table)
+    query = f"INSERT INTO {target_table} SELECT \"Date\"::TIMESTAMP as \"ts\", '{symbol}' as \"symbol\", \"Open\" as \"open\", \"High\" as \"high\", \"Low\" as \"low\", \"Close\" as \"close\", \"Volume\" as \"volume\" FROM {table_name_stg} WHERE \"Volume\" > 0 AND \"Close\" > 0 AND \"Date\" > (select COALESCE(MAX(ts), '1990-01-01') from {getRelation(input_table)} where symbol = '{symbol}') "
+    logging.info(query)
+    with vertica_connection.cursor() as vert_cur:
+        vert_cur.execute(query).fetchone()
     dropTable(table_name_stg)
-
+    logging.info(f"Finished {symbol} data loading in {target_table}")
     return input_table
 
 def generateTempName(target_symbol):
@@ -150,7 +166,7 @@ def materializeVdf(tmp, target_symbol, vdf, usecols=[]):
 
 def calculateColumns(target_symbol, vdf):
 
-    print("Calculating new columns...")
+    logging.info("Calculating new columns...")
 
     # https://www.investopedia.com/terms/m/macd.asp
     # https://www.investopedia.com/terms/m/movingaverage.asp
@@ -270,11 +286,10 @@ def trainSymbolModels(target_symbol):
     max_iterations = 100
     correlation_threashold = (0.300, 0.999)
 
-    print("============ TRAINING =============================")
+    logging.info(f"Traingin AI models for {target_symbol}")
     training_vdf, model_columns = createTrainingData(target_symbol)
 
-    print("==================================================")
-    print("Analyzing variable correlations...")
+    logging.info("Analyzing columns correlations...")
 
     ## https://matplotlib.org/3.1.0/tutorials/colors/colormaps.html
     for out_col in output_columns:
@@ -282,39 +297,32 @@ def trainSymbolModels(target_symbol):
         
         # filtrar model_columns baseado no valor das correlations
         #vdf.corr(columns = model_columns, focus=out_col, cmap="RdYlGn")
-        show_graph = False #(out_col == "close")
-        all_correlations = training_vdf.corr(columns = model_columns, focus=out_col, show=show_graph).values
+        all_correlations = training_vdf.corr(columns = model_columns, focus=out_col, show=False).values
         best_correlations = [str(c).replace('"','') for i, c in enumerate(all_correlations.get('index')) if all_correlations.get(f'"{out_col}"')[i] >= correlation_threashold[0] and all_correlations.get(f'"{out_col}"')[i] <= correlation_threashold[1] ]
         _model_columns = [c for c in model_columns if c != out_col and c.find(out_col)>0 and c in best_correlations ]
 
-        #print(f"out_col: {out_col}")
-        if show_graph:
-            print(f"model_columns: {_model_columns}")
-            input("PRESS ANY KEY TO CONTINUE!")
         if (out_col == "close"): 
-            print(f"COLUMNS: {_model_columns}")
+            logging.info(f"MODEL COLUMNS: {_model_columns}")
         
         if len(_model_columns) > 0:
-            print(f"Creating model: {model_name} [{len(_model_columns)} cols]")
+            logging.info(f"Creating model: {model_name} [{len(_model_columns)} cols]")
             model = LinearRegression(model_name, max_iter=max_iterations, solver='Newton')
             try: model.drop()
-            except: print("Training new Model...")
+            except: logging.info("Training new Model...")
             try: model.fit(training_vdf.current_relation(), _model_columns, out_col)
             except:
-                print("Error using Newton solver, trying BFGS...")
+                logging.warn("Error using Newton solver, trying BFGS...")
                 model = LinearRegression(model_name, max_iter=max_iterations, solver='BFGS')
                 model.fit(training_vdf.current_relation(), _model_columns, out_col)
 
-            print(f"Model '{out_col}' Score: {model.score(method='r2')}")
+            logging.info(f"Model '{out_col}' Score: {model.score(method='r2')}")
             output_models[out_col] = model
         else:
-            print(f"No column relevant for model: {model_name}!")
-    
-    
+            logging.warn(f"No column relevant for model: {model_name}!")
     return output_models
     
 def createTrainingData(target_symbol):
-    print("Preparing the training data...")
+    logging.info("Preparing the training data...")
     input_columns = ["close", "open", "high", "low", "volume"]
     
     ## MATERIALIZE
@@ -322,18 +330,17 @@ def createTrainingData(target_symbol):
     dropTable(tmp)
     input_colums_query_ts = ','.join([f" TS_FIRST_VALUE(\"{c}\", 'linear') as \"{c}\"" for c in input_columns])
     query_create_tmp = f"CREATE TABLE {tmp} as SELECT \"slice_time\" as \"ts\", \"symbol\",{input_colums_query_ts} FROM {getRelation(input_table)} WHERE \"symbol\" = '{target_symbol}' TIMESERIES \"slice_time\" AS '1 day' OVER(PARTITION by symbol ORDER BY ts);"
-    vert_cur.execute(query_create_tmp)
+    with vertica_connection.cursor() as vert_cur:
+        vert_cur.execute(query_create_tmp)
     vdf = vDataFrame(tmp)
 
     # TODO create projection in table tmp
     
     if vdf.empty():
-        print("No data points!")
+        logging.warn("No data points!")
         return vdf, []
 
-    #vdf.fillna(numeric_only = True)
     vdf.sort({"ts": "desc"})
-    print(vdf)
     vdf_existing_cols = [str(c).replace('"','') for c in vdf.get_columns()]
     input_columns = [c for c in input_columns if c in vdf_existing_cols]
 
@@ -351,19 +358,19 @@ def createTrainingData(target_symbol):
     new_vdf_relation = getRelation(f"{input_table}_{symbolToTable(target_symbol)}_training")
     dropTable(new_vdf_relation)
     vdf.to_db(new_vdf_relation, usecols=vdf_final_columns, relation_type="table", inplace=True)
-    print(f"Dataframe saved as: {new_vdf_relation}")
+    logging.info(f"Dataframe saved as: {new_vdf_relation}")
     dropTable(tmp)
 
     return vdf, model_columns
 
 
 def simulateSymbolData(target_symbol, output_models, days_to_simulate):
-    print("============ SIMULATING ==========================")
+    logging.info(f"Simulating {target_symbol} prices for {days_to_simulate} days")
 
     if len(output_models) > 0:
         simul_vdf_table, next_day = createSimulationTable(target_symbol, days_to_simulate=days_to_simulate)
         for _i in range(days_to_simulate+1):
-            print(f"Simulating point {_i}...")
+            logging.info(f"Simulating point {_i}...")
             
             # SIMULATE NEXT DATA POINT
             vdf = vDataFrame(simul_vdf_table)
@@ -426,19 +433,19 @@ def simulateSymbolData(target_symbol, output_models, days_to_simulate):
             dropTable(simul_res_table)
             vdf.to_db(simul_res_table, usecols=["ts", "symbol"]+outpt_columns, relation_type="table", inplace=True)
 
-            print(f"Merging {simul_res_table} into {simul_vdf_table}")
+            logging.info(f"Merging {simul_res_table} into {simul_vdf_table}")
             mergeSimulationData(simul_vdf_table, simul_res_table)
 
         # FINSIHED
         return next_day
         
     else:
-        print("no models found!")
+        logging.error("no models found!")
         return None
 
 
 def createSimulationTable(target_symbol, inpt_table=input_table, days_to_simulate=5):
-    print(f"Creating {target_symbol} simulation data...")
+    logging.info(f"Creating {target_symbol} simulation data...")
     inpt_table = getRelation(inpt_table)
 
     # save vdf to database, as a table, on the first iteration
@@ -449,7 +456,7 @@ def createSimulationTable(target_symbol, inpt_table=input_table, days_to_simulat
     from_day = getDbLastTimestamp(target_symbol, inpt_table)
     next_day = next_business_day(from_day.date())
     to_day = next_day + datetime.timedelta(days=days_to_simulate-1)
-    print(f"from_day: {from_day}, next_day:{next_day}, to_day: {to_day}, input_table: {inpt_table}")
+    logging.info(f"from_day: {from_day}, next_business_day: {next_day}, to_day: {to_day}, input_table: {inpt_table}")
 
     ## MATERIALIZE
     dropTable(simul_vdf_table)
@@ -457,11 +464,12 @@ def createSimulationTable(target_symbol, inpt_table=input_table, days_to_simulat
     input_colums_query_ts = ','.join([f" CASE WHEN slice_time <= '{from_day}' THEN ROUND(TS_FIRST_VALUE(\"{c}\", 'linear'), 2) WHEN slice_time < '{next_day}' THEN ROUND(TS_LAST_VALUE(\"{c}\"), 2) ELSE Null END as \"{c}\"" for c in input_columns])
     query_select_tmp = f"SELECT slice_time as ts, symbol,{input_colums_query_ts} FROM {input_table_query} TIMESERIES slice_time AS '1 day' OVER(PARTITION by symbol ORDER BY ts)"
     query_create_tmp = f"CREATE TABLE {simul_vdf_table} as {query_select_tmp}"
-    print(query_create_tmp)
-    vert_cur.execute(query_create_tmp)
+    logging.info(query_create_tmp)
+    with vertica_connection.cursor() as vert_cur:
+        vert_cur.execute(query_create_tmp)
 
     # TODO create projections in simul_vdf_table
-    print(f"{target_symbol} Simulation data created!")
+    logging.info(f"{target_symbol} Simulation data created!")
 
     return simul_vdf_table, next_day
 
