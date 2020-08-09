@@ -17,6 +17,10 @@ from verticapy import *
 from verticapy.toolbox import *
 from verticapy.connections.connect import *
 
+server_host = '0.0.0.0'
+server_port = 8050
+server_workers = 5
+
 conn_info = {'host': '127.0.0.1',
             'port': 5433,
             'user': 'dbadmin',
@@ -33,19 +37,23 @@ new_auto_connection(conn_info, method = "vertica_python", name = "VerticaDSN")
 change_auto_connection("VerticaDSN")
 
 vertica_connection = vertica_python.connect(**conn_info)
-vert_cur = vertica_connection.cursor()
+#vert_cur = vertica_connection.cursor()
+
 
 app = dash.Dash('Stocks', external_stylesheets=['https://codepen.io/chriddyp/pen/bWLwgP.css'])
 
 
 def listSymbols(table_name="stock_symbols"):
-    symbols = []    
-    for row in vert_cur.execute(f"SELECT DISTINCT company, symbol, industry, headquarters FROM {getRelation(table_name)} WHERE symbol in (select symbol from {getRelation(input_table)}) ;").fetchall():
-        symbols.append({'label': f"{row[0]} ({row[1]})", 'value': row[1]})
-    return symbols
+    with vertica_connection.cursor() as vert_cur:
+        symbols = []    
+        for row in vert_cur.execute(f"SELECT DISTINCT company, symbol, industry, headquarters FROM {getRelation(table_name)} WHERE symbol in (select symbol from {getRelation(input_table)}) ;").fetchall():
+            symbols.append({'label': f"{row[0]} ({row[1]})", 'value': row[1]})
+        return symbols
 
-def getDbLastTimestamp(symbol, table_name=input_table, column_name="ts"):      
-    return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM {getRelation(table_name)} WHERE symbol = '{symbol}' and close is not null;").fetchone()[0]
+def getDbLastTimestamp(symbol, table_name=input_table, column_name="ts"):  
+    with vertica_connection.cursor() as vert_cur:
+        return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM {getRelation(table_name)} WHERE symbol = '{symbol}' and close is not null;").fetchone()[0]
+    
 
 def getRelation(table=input_table, schema=db_schema, table_only=False):
     table_search = re.search(r"(\"?(\w+)\"?\.)?\"?(\w+)\"?", table, re.IGNORECASE)
@@ -75,12 +83,12 @@ def update_graph(selected_symbol, selected_period):
 
     # https://www.investopedia.com/terms/b/bollingerbands.asp
     n = 20 # Number of days in smoothing period (typically 20)
-    m = 2  # Number of standard deviations (typically 2)
-    vdf.eval(name = "TP", expr = "apply_avg(ARRAY[ high, low, close ])") # typical price
-    vdf.eval(name = "TP_DEV", expr = f"STDDEV(TP) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)") # Standard Deviation over last n periods of TP
-    vdf.eval(name = "TP_MA", expr = f"AVG(TP) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)") # typical price Moving average
-    vdf.eval(name = "BOLU", expr = f"ROUND(TP_MA + ({m} * TP_DEV), 2)") # Upper Bollinger Band
-    vdf.eval(name = "BOLD", expr = f"ROUND(TP_MA - ({m} * TP_DEV), 2)") # Lower Bollinger Band
+    m = 2.1  # Number of standard deviations (typically 2)
+    vdf.eval(name = "_TP", expr = "apply_avg(ARRAY[ high, low, close ])") # typical price
+    vdf.eval(name = "_TP_DEV", expr = f"STDDEV(_TP) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)") # Standard Deviation over last n periods of TP
+    vdf.eval(name = "_TP_MA", expr = f"AVG(_TP) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)") # typical price Moving average
+    vdf.eval(name = "BOLU", expr = f"ROUND(_TP_MA + ({m} * _TP_DEV), 2)") # Upper Bollinger Band
+    vdf.eval(name = "BOLD", expr = f"ROUND(_TP_MA - ({m} * _TP_DEV), 2)") # Lower Bollinger Band
 
     # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
     vdf.eval(name = "_up", expr = "CASE WHEN close > close_D1_0 THEN close - close_D1_0 ELSE 0 END")
@@ -92,11 +100,15 @@ def update_graph(selected_symbol, selected_period):
     #vdf.eval(name = "_dnavg_3M", expr = "AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
     #vdf.eval(name = "RMI_3M", expr = "100 * ( _upavg_3M / ( _upavg_3M - _dnavg_3M ))")
 
-
     vdf.filter(conditions = [f"ts >= ADD_MONTHS(CURRENT_TIMESTAMP, -{selected_period})"])
+
+    select_columns = [str(c).replace('"','') for c in vdf.get_columns()]
+    vdf = vdf.select([c for c in select_columns if not c.startswith("_")], False)
+
     vdf.sort({"ts": "desc"})
 
     df = vdf.to_pandas()
+    #print(df)
 
     return {
         'data': [
@@ -195,4 +207,4 @@ app.layout = html.Div(style={}, children=[
 
 
 if __name__ == '__main__':
-    app.run_server()
+    app.run_server(debug=False, use_reloader=False, host=server_host, port=server_port, threaded=True)
