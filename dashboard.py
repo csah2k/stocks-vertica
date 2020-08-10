@@ -21,12 +21,12 @@ server_host = '0.0.0.0'
 server_port = 8050
 server_workers = 5
 
-conn_info = {'host': '127.0.0.1',
+conn_info = {'host': '192.168.1.230',
             'port': 5433,
             'user': 'dbadmin',
             'password': 'stocks',
             'database': 'stocks',
-            'use_prepared_statements': True}
+            'use_prepared_statements': False}
 
 db_schema = "stocks"
 input_table = "daily_prices"

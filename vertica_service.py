@@ -21,7 +21,7 @@ HOLIDAYS_BR = holidays.BR()
 
 logfile = 'vertica_service.log'
 
-conn_info = {'host': '127.0.0.1',
+conn_info = {'host': '192.168.1.230',
             'port': 5433,
             'user': 'dbadmin',
             'password': 'stocks',
@@ -46,16 +46,23 @@ def runProcess():
     logging.info("========= STARTING PROCESS ========")
 
     ## SINGLE THREAD ###
-    for target_symbol in listSymbols():
-        ### LOAD DATA ###
-        loadHistData(target_symbol)
-        time.sleep(1)
+    #for target_symbol in listSymbols():
+    #    ### LOAD DATA ###
+    #    loadHistData(target_symbol)
+    #    time.sleep(0.5)
+
+    # Table Maintenance
+    with vertica_connection.cursor() as vert_cur:
+        data_table = getRelation()
+        vert_cur.execute(f"select do_tm_task('mergeout', '{data_table}');")
+        vert_cur.execute(f"select analyze_statistics('{data_table}', 100);")
+
 
     ## MULTI_THREAD ##
     open_threads = []
     for target_symbol in listSymbols(input_table):
         open_threads.append(executor.submit(processSymbol, target_symbol))
-        time.sleep(5)
+        time.sleep(10)
     for open_thread in open_threads:
         open_thread.result()
     
@@ -76,11 +83,15 @@ def runProcess():
 
 def processSymbol(target_symbol):
     logging.info(f'Processing symbol {target_symbol}')
-    ### TRAIN MODELS  ###   
-    models =  trainSymbolModels(target_symbol)
-    ### SIMULATE DATA ###
-    simulateSymbolData(target_symbol, models, 5)
-    logging.info(f"Symbol {target_symbol} Finished!")
+    try:
+        ### TRAIN MODELS  ###   
+        models =  trainSymbolModels(target_symbol)
+        ### SIMULATE DATA ###
+        simulateSymbolData(target_symbol, models, 5)
+        logging.info(f"Symbol {target_symbol} Finished!")
+    except Exception as error:
+        logging.error(f"ERROR IN SYMBOL: {target_symbol}")
+        logging.error(error)    
 
 def listSymbols(table_name="stock_symbols"):
     table_name = getRelation(table_name)
@@ -125,7 +136,7 @@ def symbolToTable(symbol):
     return re.sub(r'[^A-Z09]', '', symbol).lower().strip()
 
 def loadHistData(symbol):
-    logging.info(f"Loading new data YAHOO! for {symbol}")
+    logging.info(f"Loading new data from YAHOO! for {symbol}")
     df = web.DataReader(
         symbol,
         'yahoo',
@@ -138,7 +149,7 @@ def loadHistData(symbol):
     pandas_to_vertica(df, getRelation(table_name_stg, table_only=True), schema=db_schema)
 
     target_table = getRelation(input_table)
-    query = f"INSERT INTO {target_table} SELECT \"Date\"::TIMESTAMP as \"ts\", '{symbol}' as \"symbol\", \"Open\" as \"open\", \"High\" as \"high\", \"Low\" as \"low\", \"Close\" as \"close\", \"Volume\" as \"volume\" FROM {table_name_stg} WHERE \"Volume\" > 0 AND \"Close\" > 0 AND \"Date\" > (select COALESCE(MAX(ts), '1990-01-01') from {getRelation(input_table)} where symbol = '{symbol}') "
+    query = f"INSERT INTO {target_table} SELECT \"Date\"::TIMESTAMP as \"ts\", '{symbol}' as \"symbol\", \"Open\" as \"open\", \"High\" as \"high\", \"Low\" as \"low\", \"Close\" as \"close\", \"Volume\" as \"volume\" FROM {table_name_stg} WHERE \"Volume\" > 0 AND \"Close\" > 0 AND \"Date\" >= (select COALESCE(MAX(ts), '1990-01-01') from {getRelation(input_table)} where symbol = '{symbol}') "
     logging.info(query)
     with vertica_connection.cursor() as vert_cur:
         vert_cur.execute(query).fetchone()
@@ -243,7 +254,7 @@ def calculateColumns(target_symbol, vdf):
     # ===================== LAGS =====================
     for col in input_columns:
         # LAG D-1
-        vdf.eval(name = f"{col}_D1", expr = f"LAG({col}, 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
+        #vdf.eval(name = f"{col}_D1", expr = f"LAG({col}, 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
         vdf.eval(name = f"LAG_{col}_sma_1W", expr = f"LAG({col}_sma_1W, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
         vdf.eval(name = f"LAG_{col}_sma_1M", expr = f"LAG({col}_sma_1M, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
         vdf.eval(name = f"LAG_{col}_sma_3M", expr = f"LAG({col}_sma_3M, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
@@ -395,15 +406,19 @@ def simulateSymbolData(target_symbol, output_models, days_to_simulate):
                 output_models[out_col].predict(vdf, name = f"pred_{out_col}")
 
             # post simulation processing
-            if "volume" in outpt_columns: vdf.eval(name = "volume", expr = "ABS(pred_volume)::INTEGER")
-            else: vdf.eval(name = "volume", expr = "ABS(volume_D1)::INTEGER")
+            vdf.eval(name = "volume", expr = "ABS(pred_volume)::INTEGER")
+            #else: vdf.eval(name = "volume", expr = "ABS(volume_D1)::INTEGER")
 
-            if "close" in outpt_columns: vdf.eval(name = "close", expr = "ABS(pred_close)")
-            else: vdf.eval(name = "close", expr = "ROUND(ABS(close_D1), 2)")
+            vdf.eval(name = "close", expr = "ABS(pred_close)")
+            #else: vdf.eval(name = "close", expr = "ROUND(ABS(close_D1), 2)")
 
-            if "open" in outpt_columns: vdf.eval(name = "open", expr = "( LAG(close, 1, 1) OVER(PARTITION BY symbol ORDER BY ts) * 0.8)  + ( ABS(pred_open) * 0.2 )")
-            else: vdf.eval(name = "open", expr = "ROUND(ABS(open_D1), 2)")
+            vdf.eval(name = "open", expr = "( LAG(close, 1, 1) OVER(PARTITION BY symbol ORDER BY ts) * 0.7)  + ( ABS(pred_open) * 0.3 )")
+            #else: vdf.eval(name = "open", expr = "ROUND(ABS(open_D1), 2)")
+
+            vdf.eval(name = "low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
+            vdf.eval(name = "high", expr = "apply_max(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
             
+            '''
             if "high" in outpt_columns: 
                 if "low" in outpt_columns: 
                     vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
@@ -418,12 +433,12 @@ def simulateSymbolData(target_symbol, output_models, days_to_simulate):
                 else: 
                     vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(high_D1), ABS(low_D1) ])")
                     vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(high_D1), ABS(low_D1) ])")
-
-            #vdf.eval(name = "high", expr = "( ( LAG(a_high, 1, 1) OVER(PARTITION BY symbol ORDER BY ts) * 0.8) + ( a_high * 0.2 ) ) * 1.01")
             vdf.eval(name = "high", expr = "EXPONENTIAL_MOVING_AVERAGE(a_high, 0.2) OVER (PARTITION BY symbol ORDER BY ts) * 1.01")
-            #vdf.eval(name = "low", expr = "( ( LAG(a_low, 1, 0) OVER(PARTITION BY symbol ORDER BY ts) * 0.8) + ( a_low * 0.2 ) ) * 0.99")
             vdf.eval(name = "low", expr = "EXPONENTIAL_MOVING_AVERAGE(a_low, 0.2) OVER (PARTITION BY symbol ORDER BY ts) * 0.99")
- 
+            '''
+            
+
+
 
             # get only this single simulated point
             vdf.filter(conditions = [f"\"{c}\" is not Null" for c in outpt_columns]+[f"ts >= '{next_day}'::TIMESTAMP"])

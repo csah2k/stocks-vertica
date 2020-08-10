@@ -1,11 +1,68 @@
-drop schema stocks cascade;
+ALTER DATABASE stocks SET MaxClientSessions = 1000;
+
+--drop schema stocks cascade;
 create schema stocks;
 
-CREATE TABLE IF NOT EXISTS stocks.daily_prices (ts DATETIME, symbol VARCHAR(15), open NUMERIC(12,2), high NUMERIC(12,2), low NUMERIC(12,2), close NUMERIC(12,2), volume NUMERIC(20) );
-
+CREATE TABLE IF NOT EXISTS stocks.daily_prices 
+(
+    ts DATETIME, 
+    symbol VARCHAR(15), 
+    open NUMERIC(12,2), 
+    high NUMERIC(12,2), 
+    low NUMERIC(12,2), 
+    close NUMERIC(12,2), 
+    volume NUMERIC(20) 
+);
 
 drop table if exists stocks.stock_symbols;
-CREATE TABLE IF NOT EXISTS stocks.stock_symbols (company VARCHAR(50), symbol VARCHAR(10), industry VARCHAR(100), headquarters VARCHAR(100) );
+CREATE TABLE IF NOT EXISTS stocks.stock_symbols 
+(
+    company VARCHAR(50), 
+    symbol VARCHAR(10), 
+    industry VARCHAR(100), 
+    headquarters VARCHAR(100) 
+);
+
+CREATE PROJECTION daily_prices_DBD_1_rep_CMP01 /*+createtype(D)*/
+(
+    ts ENCODING COMMONDELTA_COMP, 
+    symbol ENCODING RLE, 
+    open ENCODING DELTARANGE_COMP, 
+    high ENCODING COMMONDELTA_COMP, 
+    low ENCODING COMMONDELTA_COMP, 
+    close ENCODING DELTARANGE_COMP, 
+    volume ENCODING AUTO
+)
+AS
+ SELECT ts, 
+        symbol, 
+        open, 
+        high, 
+        low, 
+        close, 
+        volume
+ FROM stocks.daily_prices 
+ ORDER BY symbol,
+          ts
+UNSEGMENTED ALL NODES;
+
+CREATE PROJECTION stock_symbols_DBD_2_rep_CMP01 /*+createtype(D)*/
+(
+    company ENCODING AUTO, 
+    symbol ENCODING AUTO, 
+    industry ENCODING AUTO, 
+    headquarters ENCODING RLE
+)
+AS
+ SELECT company, 
+        symbol, 
+        industry, 
+        headquarters
+ FROM stocks.stock_symbols 
+ ORDER BY headquarters,
+          symbol
+UNSEGMENTED ALL NODES;
+
 INSERT INTO stocks.stock_symbols VALUES ('AmBev', 'ABEV3', 'beverages', 'São Paulo');
 INSERT INTO stocks.stock_symbols VALUES ('Azul', 'AZUL4', 'airlines', 'Barueri');
 INSERT INTO stocks.stock_symbols VALUES ('B2W', 'BTOW3', 'online retail', 'Rio de Janeiro');
