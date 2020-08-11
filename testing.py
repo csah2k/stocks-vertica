@@ -45,37 +45,7 @@ logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(messa
 def runProcess():
     logging.info("========= STARTING PROCESS ========")
 
-    ## SINGLE THREAD ###
-    for target_symbol in listSymbols():
-        ### LOAD DATA ###
-        loadHistData(target_symbol)
-        #time.sleep(0.5)
-
-    # Table Maintenance
-    with vertica_connection.cursor() as vert_cur:
-        data_table = getRelation()
-        vert_cur.execute(f"select do_tm_task('mergeout', '{data_table}');")
-        vert_cur.execute(f"select analyze_statistics('{data_table}', 100);")
-
-    ## MULTI_THREAD ##
-    open_threads = []
-    for target_symbol in listSymbols(input_table):
-        open_threads.append(executor.submit(processSymbol, target_symbol))
-        time.sleep(10)
-    for open_thread in open_threads:
-        open_thread.result()
-    
-    #for target_symbol in listSymbols():
-        #processSymbol(target_symbol)
-        #symbol_models = {}
-        #for c in output_columns:
-        #    m = LinearRegression(f"\"{db_schema}\".\"LR_{symbolToTable(target_symbol)}_{c}\"", solver="CGD")
-        #    symbol_models[c] = m
-
-        #simulateSymbolData(target_symbol, trainSymbolModels(target_symbol), 10)
-        #except:
-        #    print("Error")
-        #input("PRESS ANY KEY TO CONTINUE!")
+    processSymbol('HAPV3.SA')
 
     logging.info("========= ALL SYMBOLS FINISHED ========")
     
@@ -193,16 +163,17 @@ def calculateColumns(target_symbol, vdf):
     vdf.eval(name = "_dn", expr = "CASE WHEN close > _clse_D1_0 THEN 0 ELSE _clse_D1_0 - close END")
     vdf.eval(name = "_upavg", expr = f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
     vdf.eval(name = "_dnavg", expr = f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "LAG_RSI_close", expr = "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
+    vdf.eval(name = "RSI", expr = "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
 
-    for col in input_columns:
+    for col in input_columns + ["RSI"]:
         # LAG D-1
         #vdf.eval(name = f"{col}_D1_N", expr = f"LAG({col}, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
         #vdf.eval(name = f"{col}_D1", expr = f"LAG({col}, 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
  
         # https://www.fmlabs.com/reference/default.htm?url=SimpleMA.htm
-        vdf.eval(name = f"{col}_sma_N", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
         vdf.eval(name = f"{col}_sma_1W", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 week' PRECEDING AND CURRENT ROW)")
+        vdf.eval(name = f"{col}_sma_1M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
+        vdf.eval(name = f"{col}_sma_2M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '2 month' PRECEDING AND CURRENT ROW)")
         vdf.eval(name = f"{col}_sma_3M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)") 
         #vdf.eval(name = f"{col}_sma_9M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '9 month' PRECEDING AND CURRENT ROW)")
         #vdf.eval(name = f"{col}_sma_1Y", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 year' PRECEDING AND CURRENT ROW)")
@@ -260,10 +231,11 @@ def calculateColumns(target_symbol, vdf):
     '''
 
     # ===================== LAGS =====================
-    for col in input_columns:
+    for col in input_columns + ["RSI"]:
         for lag in [1, 7, 14, 21]: # LAG D-N
-            vdf.eval(name = f"LAG_{col}_sma_N_D{lag}", expr = f"LAG({col}_sma_N, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
             vdf.eval(name = f"LAG_{col}_sma_1W_D{lag}", expr = f"LAG({col}_sma_1W, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(name = f"LAG_{col}_sma_1M_D{lag}", expr = f"LAG({col}_sma_1M, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(name = f"LAG_{col}_sma_2M_D{lag}", expr = f"LAG({col}_sma_2M, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
             vdf.eval(name = f"LAG_{col}_sma_3M_D{lag}", expr = f"LAG({col}_sma_3M, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
             #vdf.eval(name = f"LAG_{col}_sma_1Y_D{lag}", expr = f"LAG({col}_sma_1Y, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
             #vdf.eval(name = f"LAG_{col}_vshort_ema", expr = f"LAG({col}_vshort_ema, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
@@ -301,26 +273,31 @@ def trainSymbolModels(target_symbol):
     ## =========================================== ###
     output_models = {}
     max_iterations = 100
-    correlation_threashold = (0.300, 0.999)
+    correlation_threashold = (0.4, 0.999)
 
     logging.info(f"Traingin AI models for {target_symbol}")
     training_vdf, model_columns = createTrainingData(target_symbol)
 
     logging.info("Analyzing columns correlations...")
+    #training_vdf.corr(columns = model_columns, cmap="RdYlGn")
+    #input("PAUSE")
 
     ## https://matplotlib.org/3.1.0/tutorials/colors/colormaps.html
     for out_col in output_columns:
         model_name = f"\"{db_schema}\".\"LR_{symbolToTable(target_symbol)}_{out_col}\""
-        
+
         if out_col == "volume":
             correlation_threashold = (0.1, 0.999)
 
         # filtrar model_columns baseado no valor das correlations
-        all_correlations = training_vdf.corr(columns = model_columns, focus=out_col, show=False).values
+        _show = ( out_col in ["volume", "close"])
+        all_correlations = training_vdf.corr(columns = model_columns, focus=out_col, show=_show).values
         best_correlations = [str(c).replace('"','') for i, c in enumerate(all_correlations.get('index')) if all_correlations.get(f'"{out_col}"')[i] >= correlation_threashold[0] and all_correlations.get(f'"{out_col}"')[i] <= correlation_threashold[1] ]
         _model_columns = [c for c in model_columns if c != out_col and c in best_correlations and (c.find(out_col)>0 or (out_col == "volume" and c.find("close")>0))]
 
         logging.info(f"{out_col}: {_model_columns}")
+        if _show: input("PAUSE")
+
         
         if len(_model_columns) > 0:
             logging.info(f"Creating model: {model_name} [{len(_model_columns)} cols]")
@@ -402,7 +379,7 @@ def simulateSymbolData(target_symbol, output_models, days_to_simulate):
             _input_columns = [c for c in input_columns if c in vdf_existing_cols]
             model_columns = vdf.get_columns(["ts", "symbol"]+_input_columns)
             model_columns = [str(c).replace('"','') for c in model_columns]
-            model_columns = [c for c in model_columns if c.startswith("LAG_")]
+            model_columns = [c for c in model_columns if c.startswith("LAG_") or c.endswith("_D1")]
 
             vdf = vdf.select(["ts", "symbol"]+model_columns, False)
             vdf.filter(conditions = [f"ts >= ADD_MONTHS('{next_day}', -2)::TIMESTAMP"])
