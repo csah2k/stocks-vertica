@@ -77,17 +77,23 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
     print(analitcs)
 
     last_real_data = getDbLastTimestamp(selected_symbol)
-    vdf.eval(name = "hist_close", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(close, 2) ELSE Null END")
-    vdf.eval(name = "pred_close", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(close, 2) ELSE Null END")
+    print(f"last_real_data: {last_real_data}")
+    if "AI" in analitcs:
+        vdf.eval(name = "hist_close", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(close, 2) ELSE Null END")
+        vdf.eval(name = "pred_close", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(close, 2) ELSE Null END")
 
-    vdf.eval(name = "hist_open", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(open, 2) ELSE Null END")
-    vdf.eval(name = "pred_open", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(open, 2) ELSE Null END")
+        vdf.eval(name = "hist_open", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(open, 2) ELSE Null END")
+        vdf.eval(name = "pred_open", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(open, 2) ELSE Null END")
 
-    vdf.eval(name = "hist_high", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(high, 2) ELSE Null END")
-    vdf.eval(name = "pred_high", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(high, 2) ELSE Null END")
+        vdf.eval(name = "hist_high", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(high, 2) ELSE Null END")
+        vdf.eval(name = "pred_high", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(high, 2) ELSE Null END")
 
-    vdf.eval(name = "hist_low", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(low, 2) ELSE Null END")
-    vdf.eval(name = "pred_low", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(low, 2) ELSE Null END")
+        vdf.eval(name = "hist_low", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(low, 2) ELSE Null END")
+        vdf.eval(name = "pred_low", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(low, 2) ELSE Null END")
+    else:
+        vdf.filter(conditions = [f"ts <= '{last_real_data}'"])
+
+    
 
     #vdf.eval(name = "real_volume", expr=f"CASE WHEN ts <= '{last_real_data}' THEN volume/10000000 ELSE Null END")
     #vdf.eval(name = "predicted_volume", expr=f"CASE WHEN ts >= '{last_real_data}' THEN volume/10000000 ELSE Null END")
@@ -143,8 +149,10 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
     '''
 
 
-    # TODO
+    # TODO adicionar MACD
     # https://www.investopedia.com/terms/m/macd.asp
+    # TODO adicionar grafico de volume barras separado em baixo
+    # https://www.avatradeportuguese.com/education/trading-for-beginners/bandas-de-bollinger
 
 
     vdf.filter(conditions = [f"ts >= ADD_MONTHS(CURRENT_TIMESTAMP, -{selected_period})"])
@@ -288,9 +296,10 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
 
 
 all_symbols = listSymbols()
-app.layout = html.Div(style={}, children=[
+app.layout = html.Div(children=[
 
-    html.Div(style={'columnCount': 2}, children=[
+    html.Div(children=[
+        
         html.Label('Ativo'),
         dcc.Dropdown(
             id='symbol-dropdown',
@@ -331,6 +340,7 @@ app.layout = html.Div(style={}, children=[
         dcc.Dropdown(
             id='analitcs-dropdown',
             options=[
+                {'label': 'Simulation (AI)', 'value': 'AI'},
                 {'label': 'Bollinger Bands (BOL)', 'value': 'BOL'},
                 {'label': 'Price Rate of Change (ROC)', 'value': 'ROC'},
                 {'label': 'Relative Strength Index (RSI)', 'value': 'RSI'},
@@ -344,7 +354,7 @@ app.layout = html.Div(style={}, children=[
     ]),
 
 
-    html.Div(style={'columnCount': 1}, children=[
+    html.Div(children=[
             # https://dash.plotly.com/dash-core-components/graph
             dcc.Graph(
                 id='price-graph',
