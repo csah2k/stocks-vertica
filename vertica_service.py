@@ -39,7 +39,7 @@ change_auto_connection("VerticaDSN")
 vertica_connection = vertica_python.connect(**conn_info)
 #vert_cur = vertica_connection.cursor()
 
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
 
 def runProcess():
@@ -86,7 +86,7 @@ def processSymbol(target_symbol):
         ### TRAIN MODELS  ###   
         models =  trainSymbolModels(target_symbol)
         ### SIMULATE DATA ###
-        simulateSymbolData(target_symbol, models, 5)
+        simulateSymbolData(target_symbol, models, 4)
         logging.info(f"Symbol {target_symbol} Finished!")
     except Exception as error:
         logging.error(f"ERROR IN SYMBOL: {target_symbol}")

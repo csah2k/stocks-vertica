@@ -76,20 +76,19 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
     vdf = vDataFrame(getRelation(f"daily_prices_{symbolToTable(selected_symbol)}_simulation"))
     print(analitcs)
 
+    shapes = []
     last_real_data = getDbLastTimestamp(selected_symbol)
     print(f"last_real_data: {last_real_data}")
-    if "AI" in analitcs:
-        vdf.eval(name = "hist_close", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(close, 2) ELSE Null END")
-        vdf.eval(name = "pred_close", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(close, 2) ELSE Null END")
-
-        vdf.eval(name = "hist_open", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(open, 2) ELSE Null END")
-        vdf.eval(name = "pred_open", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(open, 2) ELSE Null END")
-
-        vdf.eval(name = "hist_high", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(high, 2) ELSE Null END")
-        vdf.eval(name = "pred_high", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(high, 2) ELSE Null END")
-
-        vdf.eval(name = "hist_low", expr=f"CASE WHEN ts <= '{last_real_data}' THEN ROUND(low, 2) ELSE Null END")
-        vdf.eval(name = "pred_low", expr=f"CASE WHEN ts >= '{last_real_data}' THEN ROUND(low, 2) ELSE Null END")
+    if "LR" in analitcs:
+        shapes.append({
+            'x0': last_real_data, 
+            'x1': last_real_data, 
+            'y0': 0, 
+            'y1': 1, 
+            'xref': 'x', 
+            'yref': 'paper',
+            'line_width': 1
+        })        
     else:
         vdf.filter(conditions = [f"ts <= '{last_real_data}'"])
 
@@ -98,36 +97,42 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
     #vdf.eval(name = "real_volume", expr=f"CASE WHEN ts <= '{last_real_data}' THEN volume/10000000 ELSE Null END")
     #vdf.eval(name = "predicted_volume", expr=f"CASE WHEN ts >= '{last_real_data}' THEN volume/10000000 ELSE Null END")
     
-    #  https://www.investopedia.com/terms/p/pricerateofchange.asp
-    if "ROC" in analitcs:
+    
+    if "ROCP" in analitcs or "ROCV" in analitcs or "RSI" in analitcs:
         vdf.eval(name = "_close_D1_0", expr = "LAG(close, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(name = "_close_D1_1", expr = "LAG(close, 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(name = "_roc", expr = "(close - _close_D1_0 ) / _close_D1_1 * 100")
-        vdf.eval(name = "roc_long_ema", expr = "ROUND(EXPONENTIAL_MOVING_AVERAGE(_roc, 0.075) OVER (PARTITION BY symbol ORDER BY ts), 2)")
-        vdf.eval(name = "roc_volume", expr=f"ABS(ROUND(volume/1000000, 1))")
-        vdf.normalize(["roc_volume"], "minmax")
-        vdf.eval(name = "roc_volume_buy", expr=f"CASE WHEN _roc > 0 THEN ABS(roc_volume) * 100 ELSE Null END")
-        vdf.eval(name = "roc_volume_sell", expr=f"CASE WHEN _roc <= 0 THEN ABS(roc_volume) * -100 ELSE Null END")
+        # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
+        if "RSI" in analitcs:
+            vdf.eval(name = "_up", expr = "CASE WHEN close > _close_D1_0 THEN close - _close_D1_0 ELSE 0 END")
+            vdf.eval(name = "_dn", expr = "CASE WHEN close > _close_D1_0 THEN 0 ELSE _close_D1_0 - close END")
+            vdf.eval(name = "_upavg", expr = f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+            vdf.eval(name = "_dnavg", expr = f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+            vdf.eval(name = "RSI", expr = "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
+
+        if "ROCP" in analitcs or "ROCV" in analitcs:
+            vdf.eval(name = "_close_D1_1", expr = "LAG(close, 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(name = "_roc", expr = "(close - _close_D1_0 ) / _close_D1_1 * 100")
+            #  https://www.investopedia.com/terms/p/pricerateofchange.asp
+            if "ROCP" in analitcs:
+                vdf.eval(name = "roc_long_ema", expr = "ROUND(EXPONENTIAL_MOVING_AVERAGE(_roc, 0.075) OVER (PARTITION BY symbol ORDER BY ts), 2)")
+            if "ROCV" in analitcs:
+                vdf.eval(name = "roc_volume", expr=f"ABS(ROUND(volume/1000000, 1))")
+                vdf.normalize(["roc_volume"], "minmax")
+
+                vdf.eval(name = "roc_volume_buy", expr=f"CASE WHEN _roc > 0 THEN ABS(roc_volume) * 100 ELSE Null END")
+                vdf.eval(name = "roc_volume_sell", expr=f"CASE WHEN _roc <= 0 THEN ABS(roc_volume) * -100 ELSE Null END")
     #vdf.eval(name = "roc_color", expr=f"CASE WHEN _roc > 0 THEN 'green' ELSE 'red' END")
 
     # https://www.investopedia.com/terms/b/bollingerbands.asp
     #n = 20 # Number of days in smoothing period (typically 20)
-    m = 2.1  # Number of standard deviations (typically 2)
+    m = 2.0  # Number of standard deviations (typically 2)
     if "BOL" in analitcs:
         vdf.eval(name = "_TP", expr = "apply_avg(ARRAY[ high, low, close ])") # typical price
         vdf.eval(name = "_TP_DEV", expr = f"STDDEV(_TP) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)") # Standard Deviation over last n periods of TP
-        vdf.eval(name = "_TP_MA", expr = f"AVG(_TP) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)") # typical price Moving average
-        vdf.eval(name = "BOLU", expr = f"ROUND(_TP_MA + ({m} * _TP_DEV), 2)") # Upper Bollinger Band
-        vdf.eval(name = "BOLD", expr = f"ROUND(_TP_MA - ({m} * _TP_DEV), 2)") # Lower Bollinger Band
+        vdf.eval(name = "BOLM", expr = f"AVG(_TP) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)") # typical price Moving average - Middle Bollinger Band
+        vdf.eval(name = "BOLU", expr = f"ROUND(BOLM + ({m} * _TP_DEV), 2)") # Upper Bollinger Band
+        vdf.eval(name = "BOLD", expr = f"ROUND(BOLM - ({m} * _TP_DEV), 2)") # Lower Bollinger Band
 
-    # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
-    if "RSI" in analitcs:
-        vdf.eval(name = "_clse_D1_0", expr = "LAG(close, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(name = "_up", expr = "CASE WHEN close > _clse_D1_0 THEN close - _clse_D1_0 ELSE 0 END")
-        vdf.eval(name = "_dn", expr = "CASE WHEN close > _clse_D1_0 THEN 0 ELSE _clse_D1_0 - close END")
-        vdf.eval(name = "_upavg", expr = f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
-        vdf.eval(name = "_dnavg", expr = f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
-        vdf.eval(name = "RSI", expr = "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
+
 
 
     # https://www.investopedia.com/terms/v/vwap.asp
@@ -189,7 +194,7 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
     }
     '''
 
-    if "ROC" in analitcs:
+    if "ROCP" in analitcs:
         data.append({
                 'x': df.ts,
                 'y': df.roc_long_ema,
@@ -198,6 +203,8 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
                 'yaxis': 'y2',
                 'line': { 'color': 'darkcyan', 'width': 2}
             })
+
+    if "ROCV" in analitcs:
         data.append({
                 'x': df.ts,
                 'y': df.roc_volume_buy,
@@ -222,7 +229,15 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
                 'name': 'Upper B.B. (R$)',
                 'type': 'line',
                 'yaxis': 'y1',
-                'line': { 'color': 'green', 'width': 1}
+                'line': { 'color': 'green', 'width': 1, 'dash': 'dot'}
+            })
+        data.append({
+                'x': df.ts,
+                'y': df.BOLM,
+                'name': 'Center B.B. (R$)',
+                'type': 'line',
+                'yaxis': 'y1',
+                'line': { 'color': 'grey', 'width': 1, 'dash': 'dot'}
             })
         data.append({
                 'x': df.ts,
@@ -230,8 +245,9 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
                 'name': 'Lower B.B. (R$)',
                 'type': 'line',
                 'yaxis': 'y1',
-                'line': { 'color': 'crimsom', 'width': 1}
+                'line': { 'color': 'crimsom', 'width': 1, 'dash': 'dot'}
             })
+
 
     if "RSI" in analitcs:
         data.append({
@@ -240,7 +256,7 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
                 'name': 'RSI (%)',
                 'type': 'line',
                 'yaxis': 'y2',
-                'line': { 'color': '#4b5d67', 'width': 1}
+                'line': { 'color': 'blue', 'width': 1}
             })
 
     if "VWAP" in analitcs:
@@ -258,6 +274,7 @@ def update_graph(selected_symbol, selected_period, n, analitcs):
             'margin': {'l': 70, 'r': 70, 't': 70, 'b': 70},
             'title': f"{selected_symbol} ({selected_period} Meses)",
             'height': 800,
+            'shapes': shapes,
             'yaxis': {
                 'title' : "R$",
                 'titlefont': {
@@ -340,14 +357,15 @@ app.layout = html.Div(children=[
         dcc.Dropdown(
             id='analitcs-dropdown',
             options=[
-                {'label': 'Simulation (AI)', 'value': 'AI'},
+                {'label': 'Linear Regression Simulation (LR)', 'value': 'LR'},
                 {'label': 'Bollinger Bands (BOL)', 'value': 'BOL'},
-                {'label': 'Price Rate of Change (ROC)', 'value': 'ROC'},
+                {'label': 'Price Rate of Change (ROC)', 'value': 'ROCP'},
+                {'label': 'Volume ROC (ROCV)', 'value': 'ROCV'},
                 {'label': 'Relative Strength Index (RSI)', 'value': 'RSI'},
                 {'label': 'Volume Weighted Average (VWAP)', 'value': 'VWAP'}
             ],  
             multi=True,
-            value=[],
+            value=['LR', 'BOL', 'RSI'],
             clearable=False
         ),
 
