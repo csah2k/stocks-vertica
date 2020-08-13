@@ -1,4 +1,3 @@
-#%%
 # pip3 install vertica-python verticapy holidays
 import time
 import logging
@@ -42,29 +41,32 @@ vertica_connection = vertica_python.connect(**conn_info)
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
 
-def runProcess():
+
+
+def runProcess(load_data=False, train_models=True, simulate_data=True):
     logging.info("========= STARTING PROCESS ========")
 
-    ## SINGLE THREAD ###
-    for target_symbol in listSymbols():
-        ### LOAD DATA ###
-        loadHistData(target_symbol)
-        #time.sleep(0.5)
+    ### LOAD DATA ###
+    if load_data:
+        for target_symbol in listSymbols():
+            loadHistData(target_symbol)
+        # Table Maintenance
+        with vertica_connection.cursor() as vert_cur:
+            data_table = getRelation()
+            vert_cur.execute(f"select do_tm_task('mergeout', '{data_table}');")
+            vert_cur.execute(f"select analyze_statistics('{data_table}', 100);")
 
-    # Table Maintenance
-    with vertica_connection.cursor() as vert_cur:
-        data_table = getRelation()
-        vert_cur.execute(f"select do_tm_task('mergeout', '{data_table}');")
-        vert_cur.execute(f"select analyze_statistics('{data_table}', 100);")
-
-    ## MULTI_THREAD ##
-    open_threads = []
-    for target_symbol in listSymbols(input_table):
-        open_threads.append(executor.submit(processSymbol, target_symbol))
-        time.sleep(10)
-    for open_thread in open_threads:
-        open_thread.result()
-    
+    ### TRAIN & SIMULATE DATA ###
+    if simulate_data:
+        models = trainSymbolModels()
+        # listSymbols(input_table):
+        for target_symbol in ['ABEV3.SA']:
+            processSymbol(target_symbol, models)
+    else:
+        ### ONLY TRAIN MODELS ###
+        if train_models:
+            models = trainSymbolModels()
+        
     #for target_symbol in listSymbols():
         #processSymbol(target_symbol)
         #symbol_models = {}
@@ -80,12 +82,10 @@ def runProcess():
     logging.info("========= ALL SYMBOLS FINISHED ========")
     
 
-def processSymbol(target_symbol):
+def processSymbol(target_symbol, models):
     logging.info(f'Processing symbol {target_symbol}')
     try:
-        ### TRAIN MODELS  ###   
-        models =  trainSymbolModels(target_symbol)
-        ### SIMULATE DATA ###
+        
         simulateSymbolData(target_symbol, models, 4)
         logging.info(f"Symbol {target_symbol} Finished!")
     except Exception as error:
@@ -121,10 +121,12 @@ def mergeSimulationData(simulation_table, simulation_result_table):
         return vert_cur.execute(f"MERGE INTO {getRelation(simulation_table)} sim USING {getRelation(simulation_result_table)} res ON sim.ts = res.ts WHEN MATCHED THEN UPDATE SET open = res.open, close = res.close, high = res.high, low = res.low, volume = res.volume WHEN NOT MATCHED THEN INSERT (ts, symbol, open, close, high, low, volume) VALUES (res.ts, res.symbol, res.open, res.close, res.high, res.low, res.volume);")
 
 def dropTable(table_name, cascade=True):
-    sql = f"DROP TABLE IF EXISTS {getRelation(table_name)}"
+    table_name = getRelation(table_name)
+    sql = f"DROP TABLE IF EXISTS {table_name}"
     if cascade: sql = f"{sql} CASCADE;"
     with vertica_connection.cursor() as vert_cur:
-        return vert_cur.execute(sql)
+        vert_cur.execute(sql)
+    return table_name
 
 def dropView(view_name):
     sql = f"DROP VIEW IF EXISTS {getRelation(view_name)};"
@@ -166,15 +168,15 @@ def getModelCols(vdf):
     model_columns = [c for c in model_columns if c.startswith("LAG") or c in ["ts", "symbol"]+input_columns ]
     return model_columns
 
-def materializeVdf(tmp, target_symbol, vdf, usecols=[]):
+def materializeVdf(vdf, tmp='None', target_symbol='', usecols=[]):
     prev_tmp = tmp
-    tmp = getRelation(generateTempName(target_symbol))
-    dropTable(tmp)
-    vdf.to_db(tmp, usecols=usecols, relation_type="table", inplace=True)
+    tmp = dropTable(getRelation(generateTempName(target_symbol)))
+    logging.info(f"Materializing temporary table {tmp}")
+    vdf.to_db(tmp, usecols=usecols, relation_type="temporary", inplace=True)
     dropTable(prev_tmp)
     return tmp
 
-def calculateColumns(target_symbol, vdf):
+def calculateColumns(vdf):
 
     logging.info("Calculating new columns...")
     n = 20 # Number of days in smoothing period (typically 20)
@@ -187,13 +189,23 @@ def calculateColumns(target_symbol, vdf):
     # DAY AVERAGE
     #vdf.eval(name = f"dayavg_close", expr = f"apply_avg(ARRAY[open,close,high,low])")
 
+
+    # DATE PARTS
+    '''
+    vdf.eval(name = "LAG_date_dow_all", expr = "LAG(DATE_PART('ISODOW', ts), 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
+    vdf.eval(name = "LAG_date_woy_all", expr = "LAG(DATE_PART('ISOWEEK', ts), 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
+    vdf.eval(name = "LAG_date_qtr_all", expr = "LAG(DATE_PART('QUARTER', ts), 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
+    '''
+
+
     # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
     vdf.eval(name = "_clse_D1_0", expr = "LAG(close, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-    vdf.eval(name = "_up", expr = "CASE WHEN close > _clse_D1_0 THEN close - _clse_D1_0 ELSE 0 END")
+    vdf.eval(name = "_up", expr = "CASE WHEN close > _clse_D1_0 THEN close - _clse_D1_0 ELSE 1 END")
     vdf.eval(name = "_dn", expr = "CASE WHEN close > _clse_D1_0 THEN 0 ELSE _clse_D1_0 - close END")
     vdf.eval(name = "_upavg", expr = f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
     vdf.eval(name = "_dnavg", expr = f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
-    vdf.eval(name = "LAG_RSI_close", expr = "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
+    vdf.eval(name = "LAG_RSI_all", expr = "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
+ 
 
     for col in input_columns:
         # LAG D-1
@@ -202,8 +214,11 @@ def calculateColumns(target_symbol, vdf):
  
         # https://www.fmlabs.com/reference/default.htm?url=SimpleMA.htm
         vdf.eval(name = f"{col}_sma_N", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+        #vdf.eval(name = f"{col}_sma_3D", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 days' PRECEDING AND CURRENT ROW)")
         vdf.eval(name = f"{col}_sma_1W", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 week' PRECEDING AND CURRENT ROW)")
+        #vdf.eval(name = f"{col}_sma_1M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)") 
         vdf.eval(name = f"{col}_sma_3M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)") 
+        #vdf.eval(name = f"{col}_sma_6M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '6 month' PRECEDING AND CURRENT ROW)") 
         #vdf.eval(name = f"{col}_sma_9M", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '9 month' PRECEDING AND CURRENT ROW)")
         #vdf.eval(name = f"{col}_sma_1Y", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 year' PRECEDING AND CURRENT ROW)")
         
@@ -212,12 +227,11 @@ def calculateColumns(target_symbol, vdf):
         #vdf.eval(name = f"{col}_vshort_ema", expr = f"EXPONENTIAL_MOVING_AVERAGE({col}, 0.2) OVER (PARTITION BY symbol ORDER BY ts)")
         vdf.eval(name = f"{col}_short_ema", expr = f"EXPONENTIAL_MOVING_AVERAGE({col}, 0.15) OVER (PARTITION BY symbol ORDER BY ts)")
         vdf.eval(name = f"{col}_long_ema", expr = f"EXPONENTIAL_MOVING_AVERAGE({col}, 0.075) OVER (PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(name = f"{col}_vlong_ema", expr = f"EXPONENTIAL_MOVING_AVERAGE({col}, 0.0375) OVER (PARTITION BY symbol ORDER BY ts)")
+        #vdf.eval(name = f"{col}_vlong_ema", expr = f"EXPONENTIAL_MOVING_AVERAGE({col}, 0.0375) OVER (PARTITION BY symbol ORDER BY ts)")
+
         
         # https://www.fmlabs.com/reference/default.htm?url=MACD.ht
         #vdf.eval(name = f"{col}_MACD", expr = f"{col}_short_ema - {col}_long_ema")
-
-
 
     #  https://www.investopedia.com/terms/p/pricerateofchange.asp
     '''
@@ -261,17 +275,22 @@ def calculateColumns(target_symbol, vdf):
 
     # ===================== LAGS =====================
     for col in input_columns:
-        for lag in [1, 7, 14, 21]: # LAG D-N
-            vdf.eval(name = f"LAG_{col}_sma_N_D{lag}", expr = f"LAG({col}_sma_N, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-            vdf.eval(name = f"LAG_{col}_sma_1W_D{lag}", expr = f"LAG({col}_sma_1W, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-            vdf.eval(name = f"LAG_{col}_sma_3M_D{lag}", expr = f"LAG({col}_sma_3M, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
+        for lag in [1, 7, 14]: # LAG D-N
+            vdf.eval(name = f"LAG_{col}_sma_N_D{lag}", expr = f"LAG({col}_sma_N, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+            #vdf.eval(name = f"LAG_{col}_sma_3D_D{lag}", expr = f"LAG({col}_sma_3D, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(name = f"LAG_{col}_sma_1W_D{lag}", expr = f"LAG({col}_sma_1W, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+            #vdf.eval(name = f"LAG_{col}_sma_1M_D{lag}", expr = f"LAG({col}_sma_1M, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(name = f"LAG_{col}_sma_3M_D{lag}", expr = f"LAG({col}_sma_3M, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+            #vdf.eval(name = f"LAG_{col}_sma_6M_D{lag}", expr = f"LAG({col}_sma_6M, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+            #vdf.eval(name = f"LAG_{col}_sma_9M_D{lag}", expr = f"LAG({col}_sma_9M, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
             #vdf.eval(name = f"LAG_{col}_sma_1Y_D{lag}", expr = f"LAG({col}_sma_1Y, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
             #vdf.eval(name = f"LAG_{col}_vshort_ema", expr = f"LAG({col}_vshort_ema, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
-            vdf.eval(name = f"LAG_{col}_short_ema_D{lag}", expr = f"LAG({col}_short_ema, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-            vdf.eval(name = f"LAG_{col}_long_ema_D{lag}", expr = f"LAG({col}_long_ema, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-            vdf.eval(name = f"LAG_{col}_vlong_ema_D{lag}", expr = f"LAG({col}_vlong_ema, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(name = f"LAG_{col}_short_ema_D{lag}", expr = f"LAG({col}_short_ema, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(name = f"LAG_{col}_long_ema_D{lag}", expr = f"LAG({col}_long_ema, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+            #vdf.eval(name = f"LAG_{col}_vlong_ema_D{lag}", expr = f"LAG({col}_vlong_ema, {lag}, Null) OVER(PARTITION BY symbol ORDER BY ts)")
             #vdf.eval(name = f"LAG_{col}_MACD", expr = f"LAG({col}_MACD, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
 
+            
     '''
     vdf.eval(name = "LAG_STOCH_1M_close", expr = "LAG(STOCH_1M, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
     vdf.eval(name = "LAG_STOCH_3M_close", expr = "LAG(STOCH_3M , 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
@@ -296,29 +315,33 @@ def calculateColumns(target_symbol, vdf):
 
     # https://www.fmlabs.com/reference/default.htm?url=ADX.htm    
 
+    ## MATERIALIZE
+    vdf = vdf.select(["ts", "symbol"]+input_columns+[c for c in vdf.get_columns(input_columns) if c.startswith("\"LAG_")])
+    vdf.dropna(columns=vdf.get_columns(input_columns))
+    return materializeVdf(vdf)
 
-def trainSymbolModels(target_symbol):
+
+def trainSymbolModels(target_symbol='all'):
     ## =========================================== ###
     output_models = {}
     max_iterations = 100
-    correlation_threashold = (0.300, 0.999)
+    correlation_threashold = (0.100, 0.999)
 
-    logging.info(f"Traingin AI models for {target_symbol}")
+    logging.info(f"Training new Linear Regression models")
     training_vdf, model_columns = createTrainingData(target_symbol)
 
     logging.info("Analyzing columns correlations...")
-
     ## https://matplotlib.org/3.1.0/tutorials/colors/colormaps.html
     for out_col in output_columns:
         model_name = f"\"{db_schema}\".\"LR_{symbolToTable(target_symbol)}_{out_col}\""
         
         if out_col == "volume":
-            correlation_threashold = (0.1, 0.999)
+            correlation_threashold = (0.100, 0.999)
 
         # filtrar model_columns baseado no valor das correlations
         all_correlations = training_vdf.corr(columns = model_columns, focus=out_col, show=False).values
         best_correlations = [str(c).replace('"','') for i, c in enumerate(all_correlations.get('index')) if all_correlations.get(f'"{out_col}"')[i] >= correlation_threashold[0] and all_correlations.get(f'"{out_col}"')[i] <= correlation_threashold[1] ]
-        _model_columns = [c for c in model_columns if c != out_col and c in best_correlations and (c.find(out_col)>0 or (out_col == "volume" and c.find("close")>0))]
+        _model_columns = [c for c in model_columns if c != out_col and c in best_correlations and (c.find(out_col)>0 or (out_col == "volume" and c.find("close")>0) or c.endswith("_all")) ]
 
         logging.info(f"{out_col}: {_model_columns}")
         
@@ -342,39 +365,36 @@ def trainSymbolModels(target_symbol):
 def createTrainingData(target_symbol):
     logging.info("Preparing the training data...")
     input_columns = ["close", "open", "high", "low", "volume"]
-    
-    ## MATERIALIZE
-    tmp = getRelation(generateTempName(target_symbol))
-    dropTable(tmp)
-    input_colums_query_ts = ','.join([f" TS_FIRST_VALUE(\"{c}\", 'linear') as \"{c}\"" for c in input_columns])
-    query_create_tmp = f"CREATE TABLE {tmp} as SELECT \"slice_time\" as \"ts\", \"symbol\",{input_colums_query_ts} FROM {getRelation(input_table)} WHERE \"symbol\" = '{target_symbol}' TIMESERIES \"slice_time\" AS '1 day' OVER(PARTITION by symbol ORDER BY ts);"
-    with vertica_connection.cursor() as vert_cur:
-        vert_cur.execute(query_create_tmp)
-    vdf = vDataFrame(tmp)
 
-    # TODO create projection in table tmp
-    
+    vdf = vDataFrame(getRelation(input_table)).asfreq('ts', '1 day', {
+        'volume' : 'ffill',
+        'close' : 'ffill',
+        'open' : 'ffill',
+        'high' : 'ffill',
+        'low' : 'ffill'
+        }, by=['symbol']).sort({"ts": "desc"})
+
     if vdf.empty():
         logging.warn("No data points!")
         return vdf, []
 
-    vdf.sort({"ts": "desc"})
     vdf_existing_cols = [str(c).replace('"','') for c in vdf.get_columns()]
     input_columns = [c for c in input_columns if c in vdf_existing_cols]
 
     # create all needed lag columns for weeks and months analysis
-    calculateColumns(target_symbol, vdf)
+    print(vdf)
+    input("pause")
+    tmp = calculateColumns(vdf)
 
     # normalize only model columns
     model_columns = vdf.get_columns(["ts", "symbol"]+input_columns)
     model_columns = [str(c).replace('"','') for c in model_columns]
     model_columns = [c for c in model_columns if c.startswith("LAG_")]
-    #vdf.normalize(columns = model_columns, method = "zscore")
+    #vdf.normalize(columns = [c for c in model_columns if c.find("volume")>0 ], method = "minmax")
     vdf_final_columns = ["ts", "symbol"]+input_columns+model_columns
 
     # save vdf to database, as a table
-    new_vdf_relation = getRelation(f"{input_table}_{symbolToTable(target_symbol)}_training")
-    dropTable(new_vdf_relation)
+    new_vdf_relation = dropTable(f"{input_table}__training")
     vdf.to_db(new_vdf_relation, usecols=vdf_final_columns, relation_type="table", inplace=True)
     logging.info(f"Dataframe saved as: {new_vdf_relation}")
     dropTable(tmp)
@@ -395,7 +415,7 @@ def simulateSymbolData(target_symbol, output_models, days_to_simulate):
 
             # create all needed lag columns for weeks and months analysis
             vdf.filter(conditions = [f"ts >= ADD_MONTHS('{next_day}', -24)::TIMESTAMP"])
-            calculateColumns(target_symbol, vdf)
+            tmp = calculateColumns(vdf)
             
             # select only ts, symbol and model input/output columns
             vdf_existing_cols = [str(c).replace('"','') for c in vdf.get_columns()]
@@ -454,7 +474,7 @@ def simulateSymbolData(target_symbol, output_models, days_to_simulate):
             simul_res_table = getRelation(f"{input_table}_{symbolToTable(target_symbol)}_prediction")
             dropTable(simul_res_table)
             vdf.to_db(simul_res_table, usecols=["ts", "symbol"]+outpt_columns, relation_type="table", inplace=True)
-
+            dropTable(tmp)
             logging.info(f"Merging {simul_res_table} into {simul_vdf_table}")
             mergeSimulationData(simul_vdf_table, simul_res_table)
 
@@ -501,8 +521,4 @@ def createSimulationTable(target_symbol, inpt_table=input_table, days_to_simulat
 
 ## PROCESS ALL TARGET SYMBOLS
 runProcess()
-
-
-
-# %%
 
