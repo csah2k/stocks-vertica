@@ -43,7 +43,7 @@ logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(messa
 
 
 
-def runProcess(load_data=False, train_models=True, simulate_data=True):
+def runProcess(load_data=True, train_models=True, simulate_data=True):
     logging.info("========= STARTING PROCESS ========")
 
     ### LOAD DATA ###
@@ -109,12 +109,19 @@ def next_business_day(ref_date=datetime.date.today()):
     next_day = ref_date + ONE_DAY
     while next_day.weekday() in holidays.WEEKEND or next_day in HOLIDAYS_BR:
         next_day += ONE_DAY
-    logging.info(f"Next business day: {next_day}")
+    logging.info(f"Next workday: {next_day}")
     return next_day
 
-def getDbLastTimestamp(symbol, table_name="daily_prices", column_name="ts"):
+def next_holiday_day(ref_date=datetime.date.today()):
+    next_day = ref_date + ONE_DAY
+    while next_day.weekday() not in holidays.WEEKEND and next_day not in HOLIDAYS_BR:
+        next_day += ONE_DAY
+    logging.info(f"Next holiday: {next_day}")
+    return next_day
+
+def getDbLastTimestamp(symbol='%', table_name="daily_prices", column_name="ts"):
     with vertica_connection.cursor() as vert_cur: 
-        return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM {getRelation(table_name)} WHERE symbol = '{symbol}' and close is not null;").fetchone()[0]
+        return vert_cur.execute(f"SELECT COALESCE(MAX(\"{column_name}\"), '1990-01-01') as \"{column_name}\" FROM {getRelation(table_name)} WHERE symbol like '{symbol}' and close is not null;").fetchone()[0]
 
 def mergeSimulationData(simulation_table, simulation_result_table):
     with vertica_connection.cursor() as vert_cur:
@@ -208,9 +215,12 @@ def calculateColumns(vdf):
  
 
     for col in input_columns:
-        # LAG D-1
-        #vdf.eval(name = f"{col}_D1_N", expr = f"LAG({col}, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
-        #vdf.eval(name = f"{col}_D1", expr = f"LAG({col}, 1, 1) OVER(PARTITION BY symbol ORDER BY ts)")
+        # LAG D-N
+        vdf.eval(name = f"LAG_{col}_D1", expr = f"LAG({col}, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+        vdf.eval(name = f"LAG_{col}_D2", expr = f"LAG({col}, 2, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+        vdf.eval(name = f"LAG_{col}_D3", expr = f"LAG({col}, 3, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+        vdf.eval(name = f"LAG_{col}_D4", expr = f"LAG({col}, 4, Null) OVER(PARTITION BY symbol ORDER BY ts)")
+        vdf.eval(name = f"LAG_{col}_D5", expr = f"LAG({col}, 5, Null) OVER(PARTITION BY symbol ORDER BY ts)")
  
         # https://www.fmlabs.com/reference/default.htm?url=SimpleMA.htm
         vdf.eval(name = f"{col}_sma_N", expr = f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
@@ -383,7 +393,6 @@ def createTrainingData(target_symbol):
 
     # create all needed lag columns for weeks and months analysis
     print(vdf)
-    input("pause")
     tmp = calculateColumns(vdf)
 
     # normalize only model columns
@@ -405,115 +414,108 @@ def createTrainingData(target_symbol):
 def simulateSymbolData(target_symbol, output_models, days_to_simulate):
     logging.info(f"Simulating {target_symbol} prices for {days_to_simulate} days")
 
-    if len(output_models) > 0:
-        simul_vdf_table, next_day = createSimulationTable(target_symbol, days_to_simulate=days_to_simulate)
-        for _i in range(days_to_simulate+1):
-            logging.info(f"Simulating point {_i}...")
-            
-            # SIMULATE NEXT DATA POINT
-            vdf = vDataFrame(simul_vdf_table)
-
-            # create all needed lag columns for weeks and months analysis
-            vdf.filter(conditions = [f"ts >= ADD_MONTHS('{next_day}', -24)::TIMESTAMP"])
-            tmp = calculateColumns(vdf)
-            
-            # select only ts, symbol and model input/output columns
-            vdf_existing_cols = [str(c).replace('"','') for c in vdf.get_columns()]
-            _input_columns = [c for c in input_columns if c in vdf_existing_cols]
-            model_columns = vdf.get_columns(["ts", "symbol"]+_input_columns)
-            model_columns = [str(c).replace('"','') for c in model_columns]
-            model_columns = [c for c in model_columns if c.startswith("LAG_")]
-
-            vdf = vdf.select(["ts", "symbol"]+model_columns, False)
-            vdf.filter(conditions = [f"ts >= ADD_MONTHS('{next_day}', -2)::TIMESTAMP"])
-            vdf.sort({"ts": "desc"})
-
-            outpt_columns = [c for c in output_columns if output_models.get(c, None) != None]
-            for out_col in outpt_columns:
-                output_models[out_col].predict(vdf, name = f"pred_{out_col}")
-
-            # post simulation processing
-            vdf.eval(name = "volume", expr = "ABS(pred_volume)::INTEGER")
-            #else: vdf.eval(name = "volume", expr = "ABS(volume_D1)::INTEGER")
-
-            vdf.eval(name = "close", expr = "ABS(pred_close)")
-            #else: vdf.eval(name = "close", expr = "ROUND(ABS(close_D1), 2)")
-
-            vdf.eval(name = "open", expr = "( LAG(close, 1, 1) OVER(PARTITION BY symbol ORDER BY ts) * 0.7)  + ( ABS(pred_open) * 0.3 )")
-            #else: vdf.eval(name = "open", expr = "ROUND(ABS(open_D1), 2)")
-
-            vdf.eval(name = "low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
-            vdf.eval(name = "high", expr = "apply_max(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
-            
-            '''
-            if "high" in outpt_columns: 
-                if "low" in outpt_columns: 
-                    vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
-                    vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
-                else: 
-                    vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(low_D1) ])")
-                    vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(pred_high), ABS(low_D1) ])")
-            else:
-                if "low" in outpt_columns: 
-                    vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(high_D1), ABS(pred_low) ])")
-                    vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(high_D1), ABS(pred_low) ])")
-                else: 
-                    vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(high_D1), ABS(low_D1) ])")
-                    vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(high_D1), ABS(low_D1) ])")
-            vdf.eval(name = "high", expr = "EXPONENTIAL_MOVING_AVERAGE(a_high, 0.2) OVER (PARTITION BY symbol ORDER BY ts) * 1.01")
-            vdf.eval(name = "low", expr = "EXPONENTIAL_MOVING_AVERAGE(a_low, 0.2) OVER (PARTITION BY symbol ORDER BY ts) * 0.99")
-            '''
-            
-
-
-
-            # get only this single simulated point
-            vdf.filter(conditions = [f"\"{c}\" is not Null" for c in outpt_columns]+[f"ts >= '{next_day}'::TIMESTAMP"])
-
-            # save vdf to database, as a table
-            simul_res_table = getRelation(f"{input_table}_{symbolToTable(target_symbol)}_prediction")
-            dropTable(simul_res_table)
-            vdf.to_db(simul_res_table, usecols=["ts", "symbol"]+outpt_columns, relation_type="table", inplace=True)
-            dropTable(tmp)
-            logging.info(f"Merging {simul_res_table} into {simul_vdf_table}")
-            mergeSimulationData(simul_vdf_table, simul_res_table)
-
-        # FINSIHED
-        return next_day
-        
-    else:
+    if len(output_models) <= 0:
         logging.error("no models found!")
         return None
 
+    vdf, vdf_table, next_day = createSimulationDataFrame()
 
-def createSimulationTable(target_symbol, inpt_table=input_table, days_to_simulate=5):
-    logging.info(f"Creating {target_symbol} simulation data...")
+    # create all needed lag columns
+    tmp = calculateColumns(vdf)
+    
+    # select 'ts', 'symbol' and model input&output columns
+    vdf_existing_cols = [str(c).replace('"','') for c in vdf.get_columns()]
+    _input_columns = [c for c in input_columns if c in vdf_existing_cols]
+    model_columns = vdf.get_columns(["ts", "symbol"]+_input_columns)
+    model_columns = [str(c).replace('"','') for c in model_columns]
+    model_columns = [c for c in model_columns if c.startswith("LAG_")]
+
+    vdf = vdf.select(["ts", "symbol"]+model_columns, False)
+    vdf.filter(conditions = [f"ts >= ADD_MONTHS('{next_day}', -2)::TIMESTAMP"])
+    vdf.sort({"ts": "desc"})
+
+    outpt_columns = [c for c in output_columns if output_models.get(c, None) != None]
+    for out_col in outpt_columns:
+        output_models[out_col].predict(vdf, name = f"pred_{out_col}")
+
+    # post simulation processing
+    vdf.eval(name = "volume", expr = "ABS(pred_volume)::INTEGER")
+    #else: vdf.eval(name = "volume", expr = "ABS(volume_D1)::INTEGER")
+
+    vdf.eval(name = "close", expr = "ABS(pred_close)")
+    #else: vdf.eval(name = "close", expr = "ROUND(ABS(close_D1), 2)")
+
+    vdf.eval(name = "open", expr = "( LAG(close, 1, 1) OVER(PARTITION BY symbol ORDER BY ts) * 0.7)  + ( ABS(pred_open) * 0.3 )")
+    #else: vdf.eval(name = "open", expr = "ROUND(ABS(open_D1), 2)")
+
+    vdf.eval(name = "low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
+    vdf.eval(name = "high", expr = "apply_max(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
+    
+    '''
+    if "high" in outpt_columns: 
+        if "low" in outpt_columns: 
+            vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
+            vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(pred_high), ABS(pred_low) ])")
+        else: 
+            vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(pred_high), ABS(low_D1) ])")
+            vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(pred_high), ABS(low_D1) ])")
+    else:
+        if "low" in outpt_columns: 
+            vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(high_D1), ABS(pred_low) ])")
+            vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(high_D1), ABS(pred_low) ])")
+        else: 
+            vdf.eval(name = "a_low",  expr = "apply_min(ARRAY[ open, close, ABS(high_D1), ABS(low_D1) ])")
+            vdf.eval(name = "a_high", expr = "apply_max(ARRAY[ open, close, ABS(high_D1), ABS(low_D1) ])")
+    vdf.eval(name = "high", expr = "EXPONENTIAL_MOVING_AVERAGE(a_high, 0.2) OVER (PARTITION BY symbol ORDER BY ts) * 1.01")
+    vdf.eval(name = "low", expr = "EXPONENTIAL_MOVING_AVERAGE(a_low, 0.2) OVER (PARTITION BY symbol ORDER BY ts) * 0.99")
+    '''
+    
+
+
+
+    # get only this single simulated point
+    vdf.filter(conditions = [f"\"{c}\" is not Null" for c in outpt_columns]+[f"ts >= '{next_day}'::TIMESTAMP"])
+
+    # save vdf to database, as a table
+    simul_res_table = getRelation(f"{input_table}_{symbolToTable(target_symbol)}_prediction")
+    dropTable(simul_res_table)
+    vdf.to_db(simul_res_table, usecols=["ts", "symbol"]+outpt_columns, relation_type="table", inplace=True)
+    dropTable(tmp)
+    logging.info(f"Merging {simul_res_table} into {vdf_table}")
+    mergeSimulationData(vdf_table, simul_res_table)
+    
+    return next_day
+
+def createSimulationDataFrame(simulation_name='default', inpt_table=input_table):
+    logging.info(f"Creating simulation data...")
     inpt_table = getRelation(inpt_table)
 
-    # save vdf to database, as a table, on the first iteration
-    simul_vdf_table = getRelation(f"{input_table}_{symbolToTable(target_symbol)}_simulation")
-    input_colums_query = ','.join([f" \"{c}\"" for c in input_columns])
-    null_colums_query = ','.join([f" Null as \"{c}\"" for c in input_columns])
     # generate next data points
-    from_day = getDbLastTimestamp(target_symbol, inpt_table)
+    from_day = getDbLastTimestamp(inpt_table)
     next_day = next_business_day(from_day.date())
-    to_day = next_day + datetime.timedelta(days=days_to_simulate-1)
-    logging.info(f"from_day: {from_day}, next_business_day: {next_day}, to_day: {to_day}, input_table: {inpt_table}")
+    to_day = next_holiday_day(next_day)
+    logging.info(f"from_day: {from_day}, next_day: {next_day}, to_day: {to_day}, input_table: {inpt_table}")
+    new_data_points = vdf_from_relation(f"select distinct '{to_day}'::TIMESTAMP ts, symbol, Null open , Null high, Null low, Null close, Null volume from {inpt_table};")
+    
+    ## merge the historic data with the simulated points
+    vdf = vDataFrame(getRelation(input_table)).filter(f"ts >= ADD_MONTHS('{from_day}', -24)::TIMESTAMP").append(new_data_points).asfreq('ts', '1 day', {
+        'volume' : 'ffill',
+        'close' : 'ffill',
+        'open' : 'ffill',
+        'high' : 'ffill',
+        'low' : 'ffill'
+        }, by=['symbol']).sort({"ts": "desc"})
+
 
     ## MATERIALIZE
-    dropTable(simul_vdf_table)
-    input_table_query = f"( (SELECT ts, symbol,{input_colums_query} FROM {inpt_table} WHERE symbol = '{target_symbol}' and close is not null) UNION ALL (SELECT '{to_day}'::TIMESTAMP as ts, '{target_symbol}' as symbol,{null_colums_query}) ) \"input_table\""
-    input_colums_query_ts = ','.join([f" CASE WHEN slice_time <= '{from_day}' THEN ROUND(TS_FIRST_VALUE(\"{c}\", 'linear'), 2) WHEN slice_time < '{next_day}' THEN ROUND(TS_LAST_VALUE(\"{c}\"), 2) ELSE Null END as \"{c}\"" for c in input_columns])
-    query_select_tmp = f"SELECT slice_time as ts, symbol,{input_colums_query_ts} FROM {input_table_query} TIMESERIES slice_time AS '1 day' OVER(PARTITION by symbol ORDER BY ts)"
-    query_create_tmp = f"CREATE TABLE {simul_vdf_table} as {query_select_tmp}"
-    logging.info(query_create_tmp)
-    with vertica_connection.cursor() as vert_cur:
-        vert_cur.execute(query_create_tmp)
+    vdf_relation = dropTable(f"{input_table}__{simulation_name}_simulation")
+    vdf.to_db(vdf_relation, relation_type="table", inplace=True)
+    logging.info(f"Dataframe saved as: {vdf_relation}")
 
-    # TODO create projections in simul_vdf_table
-    logging.info(f"{target_symbol} Simulation data created!")
+    # TODO create projections in vdf_relation
+    logging.info(f"Simulation data created: {vdf_relation}")
 
-    return simul_vdf_table, next_day
+    return vdf, vdf_relation, next_day
 
 
 
