@@ -34,7 +34,7 @@ db_schema = "stocks"
 input_table = "daily_prices"
 key_columns = ["ts", "symbol"]
 input_columns = ["open", "close", "high", "low", "volume"]
-output_columns = ["open", "close", "high", "low", "volume"]
+output_columns = [ "close" ] #, "open",  "high", "low", "volume"]
 
 pca_models = {}
 enet_models = {}
@@ -195,44 +195,34 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     }
     
     # DAY AVERAGE
-    '''
     logging.debug("Generating feature 'Day Average'")
-    vdf.eval("dayavg_close", "apply_avg(ARRAY[open,close,high,low])")
+    vdf.eval("dayavg_close", "apply_avg(ARRAY[close,high,low])")
     vdf.eval("LAG_dayavg", f"LAG(dayavg_close, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
     model_feats['close'].append('LAG_dayavg')
-    '''
 
     # DATE PARTS
     logging.debug(f"Generating features 'Date Parts'")
     for dtpart in ['ISODOW', 'QUARTER']:
-        _col = f"LAG_{dtpart}"
+        _col = f"LAG_D{lag}_{dtpart}"
         vdf.eval(_col, f"LAG(DATE_PART('{dtpart}', ts), {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        model_feats['close'].append(_col)
-        model_feats['open'].append(_col)
-        model_feats['high'].append(_col)
-        model_feats['low'].append(_col)
-        model_feats['volume'].append(_col)
+        for col in output_columns:
+            model_feats[col].append(_col)
         category_feats.append(_col)
 
     # https://wiki.timetotrade.com/Candlestick_Tail_Size
-    '''
     logging.debug(f"Generating features 'Candlestick'")
     vdf.eval("candle_head", "high - apply_max(ARRAY[open, close])")
     vdf.eval("candle_body", "apply_max(ARRAY[open, close]) - apply_min(ARRAY[open, close])")
     vdf.eval("candle_tail", "apply_min(ARRAY[open, close]) - low")
     for candle in ['candle_head', 'candle_body', 'candle_tail']:
-        _col = f"LAG_{candle}"
+        _col = f"LAG_D{lag}_{candle}"
         vdf.eval(_col, f"LAG({candle}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        model_feats['close'].append(_col)
-        model_feats['open'].append(_col)
-        model_feats['high'].append(_col)
-        model_feats['low'].append(_col)
-        model_feats['volume'].append(_col)
+        for col in output_columns:
+            model_feats[col].append(_col)
         numeric_feats.append(_col)
-    '''
 
     # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
-    _col = 'LAG_RSI'
+    _col = f'LAG_D{lag}_RSI'
     logging.debug(f"Generating feature 'RSI'")
     vdf.eval("_clse_D1_0", f"LAG(close, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
     vdf.eval("_up", "CASE WHEN close > _clse_D1_0 THEN close - _clse_D1_0 ELSE 1 END")
@@ -240,18 +230,15 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     vdf.eval("_upavg", f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
     vdf.eval("_dnavg", f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
     vdf.eval(_col, "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
-    model_feats['close'].append(_col)
-    model_feats['open'].append(_col)
-    model_feats['high'].append(_col)
-    model_feats['low'].append(_col)
-    model_feats['volume'].append(_col)
+    for col in output_columns:
+        model_feats[col].append(_col)
     numeric_feats.append(_col) 
  
     # LAG D-N
     max_lags = 5
-    logging.debug(f"Generating features 'Lags D-N ({lag} - {lag+max_lags})'")
-    for col in input_columns:    
-        for i in range(lag, lag+max_lags):
+    logging.debug(f"Generating features 'Lags D-N (1 - {max_lags})'")
+    for col in output_columns:    
+        for i in range(1, max_lags):
             _col = f"LAG_D{i}_{col}"
             vdf.eval(_col, f"LAG({col}, {i}) OVER(PARTITION BY symbol ORDER BY ts)")
             model_feats[col].append(_col)
@@ -259,7 +246,7 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
 
     # https://www.fmlabs.com/reference/default.htm?url=SimpleMA.htm
     logging.debug(f"Generating features 'SMA (N, 1W, 3M)'")
-    for col in input_columns:
+    for col in output_columns:
         for interv in [f'{n} days', '1 week', '3 month']:
             _interv = re.sub(r'\W', '', interv).upper()
             _col = f"SMA{_interv}_{col}"
@@ -270,66 +257,57 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
         
     # https://www.fmlabs.com/reference/default.htm?url=ExpMA.htm
     logging.debug(f"Generating features 'ExpMA (short, long)'")
-    for col in input_columns:
-        vdf.eval(f"{col}_short_ema", f"EXPONENTIAL_MOVING_AVERAGE({col}, 0.15) OVER (PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(f"{col}_long_ema", f"EXPONENTIAL_MOVING_AVERAGE({col}, 0.075) OVER (PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(f"LAG_D{lag}_SEMA_{col}", f"LAG({col}_short_ema, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(f"LAG_D{lag}_LEMA_{col}", f"LAG({col}_long_ema, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        model_feats[col].append(f"LAG_D{lag}_SEMA_{col}")
-        model_feats[col].append(f"LAG_D{lag}_LEMA_{col}")
+    for col in output_columns:
+        for ratio in ['0.075', '0.15']:
+            _ratio = re.sub(r'\D', '', ratio)
+            vdf.eval(f"EMA{_ratio}_{col}", f"EXPONENTIAL_MOVING_AVERAGE({col}, {ratio}) OVER (PARTITION BY symbol ORDER BY ts)")
+            _col = f"LAG_D{lag}_EMA{_ratio}_{col}"
+            vdf.eval(_col, f"LAG(EMA{_ratio}_{col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+            model_feats[col].append(_col)
 
     # https://www.fmlabs.com/reference/default.htm?url=MACD.ht
-    '''
-    logging.info(f"Generating features 'MACD (close, open, high, low, volume)'")
-    for col in input_columns:
-        vdf.eval(f"MACD", f"{col}_short_ema - {col}_long_ema")
-        vdf.eval(f"LAG_{col}_MACD", f"LAG({col}_MACD, 1) OVER(PARTITION BY symbol ORDER BY ts)")
-    vdf.save()
-    '''
-        
-    
+    logging.debug(f"Generating features 'MACD'")
+    for col in output_columns:
+        _col = f"LAG_D{lag}_MACD_{col}"
+        vdf.eval(f"MACD_{col}", f"EMA015_{col} - EMA0075_{col}")
+        vdf.eval(_col, f"LAG(MACD_{col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+        model_feats[col].append(_col)
+        numeric_feats.append(_col) 
 
     #  https://www.investopedia.com/terms/p/pricerateofchange.asp
-    '''
-    vdf.eval("roc", "(close - close_D1_N )/ close_D1_1 * 100")
-    vdf.eval("roc_long_ema", "EXPONENTIAL_MOVING_AVERAGE(roc, 0.075) OVER (PARTITION BY symbol ORDER BY ts)")
-    vdf.eval("roc_short_ema", "EXPONENTIAL_MOVING_AVERAGE(roc, 0.15) OVER (PARTITION BY symbol ORDER BY ts)")
-    '''
+    for col in output_columns:
+        vdf.eval("ROC", f"({col} - (LAG({col}, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)) ) / (LAG({col}, {lag}, 1) OVER(PARTITION BY symbol ORDER BY ts)) * 100")
+        for ratio in ['0.075', '0.15']:
+            _ratio = re.sub(r'\D', '', ratio)
+            _col = f"LAG_D{lag}_ROC_EMA{_ratio}_{col}"
+            vdf.eval(f"ROC_EMA{_ratio}_{col}", f"EXPONENTIAL_MOVING_AVERAGE(ROC, {ratio}) OVER (PARTITION BY symbol ORDER BY ts)")
+            vdf.eval(_col, f"LAG(ROC_EMA{_ratio}_{col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+            model_feats[col].append(_col)
+            numeric_feats.append(_col)
 
     # https://www.investopedia.com/terms/v/vwap.asp
-    '''
-    vdf.eval("PV", "volume * ((high + low + close) / 3)")
-    vdf.eval("VWAP", "PV / volume")
-    '''
-
-    # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
-    '''
-    vdf.eval("_up", "CASE WHEN close > close_D1_1 THEN close - close_D1_1 ELSE 0 END")
-    vdf.eval("_dn", "CASE WHEN close > close_D1_1 THEN 0 ELSE close_D1_1 - close END")
-
-    vdf.eval("_upavg_1M", "AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("_dnavg_1M", "AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("RMI_1M", "100 * ( _upavg_1M / ( _upavg_1M - _dnavg_1M ))")
-    
-    vdf.eval("_upavg_3M", "AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("_dnavg_3M", "AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("RMI_3M", "100 * ( _upavg_3M / ( _upavg_3M - _dnavg_3M ))")
-    '''
+    _col = f'LAG_D{lag}_VWAP'
+    vdf.eval("VWAP", "(volume * ((high + low + close) / 3)) / volume")
+    vdf.eval(_col, f"LAG(VWAP, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+    for col in output_columns:
+        model_feats[col].append(_col)
+    numeric_feats.append(_col)
+  
 
     # https://www.fmlabs.com/reference/default.htm?url=StochasticOscillator.htm
     '''
-    vdf.eval("highest_high_1M", "MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("lowest_low_1M", "MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("_k_1M", "100 * ((close - lowest_low_1M ) / (highest_high_1M - lowest_low_1M))")
-    vdf.eval("STOCH_1M", "EXPONENTIAL_MOVING_AVERAGE(_k_1M, 0.15) OVER (PARTITION BY symbol ORDER BY ts)")
-
-    vdf.eval("highest_high_3M", "MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("lowest_low_3M", "MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '3 month' PRECEDING AND CURRENT ROW)")
-    vdf.eval("_k_3M", "100 * ((close - lowest_low_3M ) / (highest_high_3M - lowest_low_3M ))")    
-    vdf.eval("STOCH_3M", "EXPONENTIAL_MOVING_AVERAGE (_k_3M , 0.075) OVER (PARTITION BY symbol ORDER BY ts)")
-
-    vdf.eval("LAG_STOCH_1M_close", "LAG(STOCH_1M, 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
-    vdf.eval("LAG_STOCH_3M_close", "LAG(STOCH_3M , 1, 0) OVER(PARTITION BY symbol ORDER BY ts)")
+    _col = f'LAG_D{lag}_STOCH'
+    vdf.eval("highest_high", f"MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+    vdf.eval("lowest_low", f"MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+    vdf.eval("stch_k", "100 * ((close - lowest_low ) / (highest_high - lowest_low))")
+    for ratio in ['0.075', '0.15']:
+        _ratio = re.sub(r'\D', '', ratio)
+        _col = f"LAG_D{lag}_STOCH_EMA{_ratio}"
+        vdf.eval(f"STOCH_EMA{_ratio}", f"EXPONENTIAL_MOVING_AVERAGE(stch_k, {ratio}) OVER (PARTITION BY symbol ORDER BY ts)")
+        vdf.eval(_col, f"LAG(STOCH_EMA{_ratio}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+        for col in output_columns:
+            model_feats[col].append(_col)
+        numeric_feats.append(_col)
     '''
 
     # https://www.fmlabs.com/reference/default.htm?url=DI.htm
@@ -411,7 +389,7 @@ def runFeatureDecomposition(vdf, model_columns, out_col):
 def trainModels(inpt_table=input_table):
     ## =========================================== ###
     inpt_table = getRelation(inpt_table)
-    max_iterations = 30000
+    max_iterations = 1000
 
     logging.info(f"Training new models ...")
     training_vdf, models_feats, all_models_feats = createTrainingDataFrame()
@@ -427,13 +405,13 @@ def trainModels(inpt_table=input_table):
 
         enet_model_name = getRelation(f"ENET__{out_col}")
         logging.info(f"Creating model: {enet_model_name},  iter: {max_iterations}, n_cols: {len(_model_columns)}, cols: {_model_columns}")
-        model = ElasticNet(enet_model_name, max_iter=max_iterations)#, solver='BFGS')
+        model = ElasticNet(enet_model_name, max_iter=max_iterations, penalty='None', solver='BFGS')
         try: model.drop()
         except: logging.info("Creating new ENET Model...")
         #try: model.fit(training_vdf.current_relation(), model_columns, out_col)
         #except: logging.error(f"Error Training ENET model {enet_model_name}")
         model.fit(_training_vdf.current_relation(), _model_columns, out_col)
-
+        print(model.regression_report())
         logging.info(f"Model '{out_col}' Score: {model.score(method='r2')}")
         enet_models[out_col] = model
 
@@ -517,18 +495,18 @@ def createSimulationDataFrame(simulation_name='default', inpt_table=input_table)
 
 
 def simulateNextDay(simulation_name='default'):
-    logging.info(f"Running simulation '{simulation_name}'")
+    logging.info(f"========= Running simulation '{simulation_name}' ========= ")
 
     if len(enet_models) <= 0:
         logging.error("no models found!")
         return None
 
-    vdf, vdf_table, next_day = createSimulationDataFrame()
+    vdf, _, next_day = createSimulationDataFrame()
 
     # create all needed lag columns
-    tmp, models_feats, all_models_feats = generateFeatures(vdf)
+    tmp, models_feats, _ = generateFeatures(vdf)
     vdf.filter(f"(ts = '{next_day}'::TIMESTAMP OR ts = '{next_day - datetime.timedelta(days=1)}'::TIMESTAMP)")
-
+    predicted_cols = []
     for out_col in [c for c in output_columns if enet_models.get(c, None) != None]:
         #logging.info(f"Running Feature Decomposition: {out_col}")
         #_vdf, _model_columns = runFeatureDecomposition(vdf, model_columns, out_col)
@@ -537,12 +515,13 @@ def simulateNextDay(simulation_name='default'):
         pred_col =  f"pred_{out_col}"
         logging.debug(f"Predicting '{out_col}', cols: {_model_columns}")
         enet_models[out_col].predict(vdf, name = pred_col)
+        predicted_cols.append(pred_col)
 
-    
-        pred_value = vdf.to_pandas().at[0,pred_col]
-        logging.info(f"Predicted value of '{out_col}': {pred_value}")
-
+        #pred_value = vdf.to_pandas().at[0,pred_col]
+        #logging.info(f"Predicted value of '{out_col}': {pred_value}")
+    vdf = vdf.select(key_columns+input_columns+predicted_cols)
     print(vdf)
+
 
  
     # post simulation processing
