@@ -205,8 +205,7 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     for dtpart in ['ISODOW', 'QUARTER']:
         _col = f"LAG_D{lag}_{dtpart}"
         vdf.eval(_col, f"LAG(DATE_PART('{dtpart}', ts), {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        for col in output_columns:
-            model_feats[col].append(_col)
+        for col in output_columns: model_feats[col].append(_col)
         category_feats.append(_col)
 
     # https://wiki.timetotrade.com/Candlestick_Tail_Size
@@ -217,8 +216,7 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     for candle in ['candle_head', 'candle_body', 'candle_tail']:
         _col = f"LAG_D{lag}_{candle}"
         vdf.eval(_col, f"LAG({candle}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        for col in output_columns:
-            model_feats[col].append(_col)
+        for col in output_columns:  model_feats[col].append(_col)
         numeric_feats.append(_col)
 
     # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
@@ -227,11 +225,10 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     vdf.eval("_clse_D1_0", f"LAG(close, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
     vdf.eval("_up", "CASE WHEN close > _clse_D1_0 THEN close - _clse_D1_0 ELSE 1 END")
     vdf.eval("_dn", "CASE WHEN close > _clse_D1_0 THEN 0 ELSE _clse_D1_0 - close END")
-    vdf.eval("_upavg", f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
-    vdf.eval("_dnavg", f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n-1} days' PRECEDING AND CURRENT ROW)")
+    vdf.eval("_upavg", f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+    vdf.eval("_dnavg", f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
     vdf.eval(_col, "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
-    for col in output_columns:
-        model_feats[col].append(_col)
+    for col in output_columns: model_feats[col].append(_col)
     numeric_feats.append(_col) 
  
     # LAG D-N
@@ -241,6 +238,10 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
         for i in range(1, max_lags):
             _col = f"LAG_D{i}_{col}"
             vdf.eval(_col, f"LAG({col}, {i}) OVER(PARTITION BY symbol ORDER BY ts)")
+            model_feats[col].append(_col)
+        if lag not in range(1, max_lags): ## assure main lag existence
+            _col = f"LAG_D{lag}_{col}"
+            vdf.eval(_col, f"LAG({col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
             model_feats[col].append(_col)
                 
 
@@ -289,13 +290,11 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     _col = f'LAG_D{lag}_VWAP'
     vdf.eval("VWAP", "(volume * ((high + low + close) / 3)) / volume")
     vdf.eval(_col, f"LAG(VWAP, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-    for col in output_columns:
-        model_feats[col].append(_col)
+    for col in output_columns: model_feats[col].append(_col)
     numeric_feats.append(_col)
   
 
     # https://www.fmlabs.com/reference/default.htm?url=StochasticOscillator.htm
-    '''
     _col = f'LAG_D{lag}_STOCH'
     vdf.eval("highest_high", f"MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
     vdf.eval("lowest_low", f"MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
@@ -305,21 +304,49 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
         _col = f"LAG_D{lag}_STOCH_EMA{_ratio}"
         vdf.eval(f"STOCH_EMA{_ratio}", f"EXPONENTIAL_MOVING_AVERAGE(stch_k, {ratio}) OVER (PARTITION BY symbol ORDER BY ts)")
         vdf.eval(_col, f"LAG(STOCH_EMA{_ratio}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        for col in output_columns:
-            model_feats[col].append(_col)
+        for col in output_columns: model_feats[col].append(_col)
         numeric_feats.append(_col)
-    '''
+
+
+    # https://www.fmlabs.com/reference/default.htm?url=OBV.htm
+    _col = f'LAG_D{lag}_OBV'
+    vdf.eval("_bv", "CASE WHEN close > LAG_D1_close THEN ABS(volume) WHEN close < LAG_D1_close THEN ABS(volume) * -1 ELSE 0 END")
+    vdf.eval("OBV", "LAG(_bv, 1) OVER(PARTITION BY symbol ORDER BY ts) + _bv")
+    vdf.eval(_col, f"LAG(OBV, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+    for col in output_columns: model_feats[col].append(_col)
+    numeric_feats.append(_col)
 
     # https://www.fmlabs.com/reference/default.htm?url=DI.htm
-    #vdf.eval(f"_delta_high", f"LAG(high, 1, Null) OVER(PARTITION BY symbol ORDER BY ts) - high")
-    #vdf.eval(f"_delta_low", f"low - LAG(low, 1, Null) OVER(PARTITION BY symbol ORDER BY ts)")
-    #vdf.eval(f"_plus_dm", f"CASE WHEN ( _delta_high < 0 AND _delta_low < 0 ) OR _delta_high = _delta_low THEN 0 WHEN _delta_high > _delta_low THEN _delta_high ELSE 0 END")
-    #vdf.eval(f"_minus_dm", f"CASE WHEN ( _delta_high < 0 AND _delta_low < 0 ) OR _delta_high = _delta_low THEN 0 WHEN _delta_high > _delta_low THEN 0 ELSE _delta_low END")
+    vdf.eval("_delta_high", "LAG(high, 1) OVER(PARTITION BY symbol ORDER BY ts) - high")
+    vdf.eval("_delta_low", "low - LAG(low, 1) OVER(PARTITION BY symbol ORDER BY ts)")
+    vdf.eval("_plus_dm", "CASE WHEN ( _delta_high < 0 AND _delta_low < 0 ) OR _delta_high = _delta_low THEN 0 WHEN _delta_high > _delta_low THEN _delta_high ELSE 0 END")
+    vdf.eval("_minus_dm", "CASE WHEN ( _delta_high < 0 AND _delta_low < 0 ) OR _delta_high = _delta_low THEN 0 WHEN _delta_high > _delta_low THEN 0 ELSE _delta_low END")
+    vdf.eval("_plus_dm_sum", f"LAG(_plus_dm, 1) OVER(PARTITION BY symbol ORDER BY ts) - (LAG(_plus_dm, 1) OVER(PARTITION BY symbol ORDER BY ts) / {n}) + _plus_dm")
+    vdf.eval("_minus_dm_sum", f"LAG(_minus_dm, 1) OVER(PARTITION BY symbol ORDER BY ts) - (LAG(_minus_dm, 1) OVER(PARTITION BY symbol ORDER BY ts) / {n}) + _minus_dm")
+    vdf.eval("_tr",  "apply_max(ARRAY[ high, LAG_D1_close ]) - apply_min(ARRAY[ low,  LAG_D1_close ])")
+    vdf.eval("_tr_sum", f"LAG(_tr, 1) OVER(PARTITION BY symbol ORDER BY ts) - (LAG(_tr, 1) OVER(PARTITION BY symbol ORDER BY ts) / {n}) + _tr")
+    vdf.eval("_tr_sum_safe", "CASE WHEN _tr_sum = 0 THEN Null ELSE _tr_sum END")
+    vdf["_tr_sum_safe"].fillna(method="ffill", by=["symbol"], order_by=["ts"])
+    vdf.eval("pDI",  "100 * (_plus_dm_sum / _tr_sum_safe)")
+    vdf.eval("mDI",  "100 * (_minus_dm_sum / _tr_sum_safe)")
+    # https://www.fmlabs.com/reference/default.htm?url=DX.htm
+    vdf.eval("DX",  "(pDI - mDI) / (pDI + mDI)")
+    # https://www.fmlabs.com/reference/default.htm?url=ADX.htm
+    vdf.eval("ADX", f"AVG(DX) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+    _col = f'LAG_D{lag}_ADX'
+    vdf.eval(_col, f"LAG(ADX, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+    for col in output_columns: model_feats[col].append(_col)
+    numeric_feats.append(_col)
+    # https://www.fmlabs.com/reference/default.htm?url=ADXR.htm
+    vdf.eval("ADXR", f"apply_avg(ARRAY[ ADX, LAG(ADX, {n}) OVER(PARTITION BY symbol ORDER BY ts) ] )")
+    _col = f'LAG_D{lag}_ADXR'
+    vdf.eval(_col, f"LAG(ADXR, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+    for col in output_columns: model_feats[col].append(_col)
+    numeric_feats.append(_col)
+
+
     
-    #vdf.eval(f"_plus_dm_sum", f"LAG(RMI_3M, 1, Null) OVER(PARTITION BY symbol ORDER BY ts) ")
-    #vdf.eval(f"_minus_dm_sum", f"")
-    
-    
+
     # https://www.fmlabs.com/reference/default.htm?url=DX.htm
 
     # https://www.fmlabs.com/reference/default.htm?url=ADX.htm    

@@ -1,4 +1,5 @@
 ALTER DATABASE stocks SET MaxClientSessions = 1000;
+ALTER DATABASE stocks SET DivideZeroByZeroThrowsError = 0;
 
 --drop schema stocks cascade;
 create schema stocks;
