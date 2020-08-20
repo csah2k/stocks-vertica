@@ -196,17 +196,18 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     
     # DAY AVERAGE
     logging.debug("Generating feature 'Day Average'")
-    vdf.eval("dayavg_close", "apply_avg(ARRAY[close,high,low])")
-    vdf.eval("LAG_dayavg", f"LAG(dayavg_close, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-    model_feats['close'].append('LAG_dayavg')
+    vdf.eval("DAYAVG", "apply_avg(ARRAY[open,close,high,low])")
+    _lag = createLag(vdf, "DAYAVG", lag)
+    for col in ['open','close','high','low']: model_feats[col].append(_lag)
 
     # DATE PARTS
     logging.debug(f"Generating features 'Date Parts'")
     for dtpart in ['ISODOW', 'QUARTER']:
-        _col = f"LAG_D{lag}_{dtpart}"
-        vdf.eval(_col, f"LAG(DATE_PART('{dtpart}', ts), {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        for col in output_columns: model_feats[col].append(_col)
-        category_feats.append(_col)
+        _col = f"DT_{dtpart}"
+        vdf.eval(_col, f"DATE_PART('{dtpart}', ts)")
+        _lag = createLag(vdf, _col, lag)
+        for col in output_columns: model_feats[col].append(_lag)
+        category_feats.append(_lag)
 
     # https://wiki.timetotrade.com/Candlestick_Tail_Size
     logging.debug(f"Generating features 'Candlestick'")
@@ -214,36 +215,32 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     vdf.eval("candle_body", "apply_max(ARRAY[open, close]) - apply_min(ARRAY[open, close])")
     vdf.eval("candle_tail", "apply_min(ARRAY[open, close]) - low")
     for candle in ['candle_head', 'candle_body', 'candle_tail']:
-        _col = f"LAG_D{lag}_{candle}"
-        vdf.eval(_col, f"LAG({candle}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        for col in output_columns:  model_feats[col].append(_col)
-        numeric_feats.append(_col)
+        _lag = createLag(vdf, candle, lag)
+        for col in output_columns: model_feats[col].append(_lag)
+        numeric_feats.append(_lag)
 
     # https://www.fmlabs.com/reference/default.htm?url=RSI.htm
-    _col = f'LAG_D{lag}_RSI'
     logging.debug(f"Generating feature 'RSI'")
     vdf.eval("_clse_D1_0", f"LAG(close, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)")
     vdf.eval("_up", "CASE WHEN close > _clse_D1_0 THEN close - _clse_D1_0 ELSE 1 END")
     vdf.eval("_dn", "CASE WHEN close > _clse_D1_0 THEN 0 ELSE _clse_D1_0 - close END")
     vdf.eval("_upavg", f"AVG(_up) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
     vdf.eval("_dnavg", f"AVG(_dn) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
-    vdf.eval(_col, "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
-    for col in output_columns: model_feats[col].append(_col)
-    numeric_feats.append(_col) 
+    vdf.eval("RSI", "ROUND(100 * ( _upavg / ( _upavg + _dnavg )), 2)")
+    _lag = createLag(vdf, "RSI", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag) 
  
     # LAG D-N
     max_lags = 5
     logging.debug(f"Generating features 'Lags D-N (1 - {max_lags})'")
     for col in output_columns:    
         for i in range(1, max_lags):
-            _col = f"LAG_D{i}_{col}"
-            vdf.eval(_col, f"LAG({col}, {i}) OVER(PARTITION BY symbol ORDER BY ts)")
-            model_feats[col].append(_col)
+            _lag = createLag(vdf, col, i)
+            model_feats[col].append(_lag)
         if lag not in range(1, max_lags): ## assure main lag existence
-            _col = f"LAG_D{lag}_{col}"
-            vdf.eval(_col, f"LAG({col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-            model_feats[col].append(_col)
-                
+            _lag = createLag(vdf, col, lag)
+            model_feats[col].append(_lag)
 
     # https://www.fmlabs.com/reference/default.htm?url=SimpleMA.htm
     logging.debug(f"Generating features 'SMA (N, 1W, 3M)'")
@@ -252,9 +249,8 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
             _interv = re.sub(r'\W', '', interv).upper()
             _col = f"SMA{_interv}_{col}"
             vdf.eval(_col, f"AVG({col}) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{interv}' PRECEDING AND CURRENT ROW)")
-            _cl = f"LAG_D{lag}_SMA{_interv}_{col}"
-            vdf.eval(_cl, f"LAG({_col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-            model_feats[col].append(_cl)
+            _lag = createLag(vdf, _col, lag)
+            model_feats[col].append(_lag)
         
     # https://www.fmlabs.com/reference/default.htm?url=ExpMA.htm
     logging.debug(f"Generating features 'ExpMA (short, long)'")
@@ -262,61 +258,61 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
         for ratio in ['0.075', '0.15']:
             _ratio = re.sub(r'\D', '', ratio)
             vdf.eval(f"EMA{_ratio}_{col}", f"EXPONENTIAL_MOVING_AVERAGE({col}, {ratio}) OVER (PARTITION BY symbol ORDER BY ts)")
-            _col = f"LAG_D{lag}_EMA{_ratio}_{col}"
-            vdf.eval(_col, f"LAG(EMA{_ratio}_{col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-            model_feats[col].append(_col)
+            _lag = createLag(vdf, f"EMA{_ratio}_{col}", lag)
+            model_feats[col].append(_lag)
 
     # https://www.fmlabs.com/reference/default.htm?url=MACD.ht
+    # https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/apo
     logging.debug(f"Generating features 'MACD'")
     for col in output_columns:
         _col = f"LAG_D{lag}_MACD_{col}"
         vdf.eval(f"MACD_{col}", f"EMA015_{col} - EMA0075_{col}")
-        vdf.eval(_col, f"LAG(MACD_{col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        model_feats[col].append(_col)
-        numeric_feats.append(_col) 
+        _lag = createLag(vdf, f"MACD_{col}", lag)
+        model_feats[col].append(_lag)
+        numeric_feats.append(_lag) 
 
     #  https://www.investopedia.com/terms/p/pricerateofchange.asp
+    logging.debug(f"Generating feature 'ROC'")
     for col in output_columns:
         vdf.eval("ROC", f"({col} - (LAG({col}, {lag}, 0) OVER(PARTITION BY symbol ORDER BY ts)) ) / (LAG({col}, {lag}, 1) OVER(PARTITION BY symbol ORDER BY ts)) * 100")
         for ratio in ['0.075', '0.15']:
             _ratio = re.sub(r'\D', '', ratio)
-            _col = f"LAG_D{lag}_ROC_EMA{_ratio}_{col}"
             vdf.eval(f"ROC_EMA{_ratio}_{col}", f"EXPONENTIAL_MOVING_AVERAGE(ROC, {ratio}) OVER (PARTITION BY symbol ORDER BY ts)")
-            vdf.eval(_col, f"LAG(ROC_EMA{_ratio}_{col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-            model_feats[col].append(_col)
-            numeric_feats.append(_col)
+            _lag = createLag(vdf, f"ROC_EMA{_ratio}_{col}", lag)
+            model_feats[col].append(_lag)
+            numeric_feats.append(_lag)
 
     # https://www.investopedia.com/terms/v/vwap.asp
-    _col = f'LAG_D{lag}_VWAP'
+    logging.debug(f"Generating feature 'VWAP'")
     vdf.eval("VWAP", "(volume * ((high + low + close) / 3)) / volume")
-    vdf.eval(_col, f"LAG(VWAP, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-    for col in output_columns: model_feats[col].append(_col)
-    numeric_feats.append(_col)
+    _lag = createLag(vdf, "VWAP", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag)
   
 
     # https://www.fmlabs.com/reference/default.htm?url=StochasticOscillator.htm
-    _col = f'LAG_D{lag}_STOCH'
+    logging.debug(f"Generating feature 'STOCH'")
     vdf.eval("highest_high", f"MAX(high) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
     vdf.eval("lowest_low", f"MIN(low) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
     vdf.eval("stch_k", "100 * ((close - lowest_low ) / (highest_high - lowest_low))")
     for ratio in ['0.075', '0.15']:
         _ratio = re.sub(r'\D', '', ratio)
-        _col = f"LAG_D{lag}_STOCH_EMA{_ratio}"
         vdf.eval(f"STOCH_EMA{_ratio}", f"EXPONENTIAL_MOVING_AVERAGE(stch_k, {ratio}) OVER (PARTITION BY symbol ORDER BY ts)")
-        vdf.eval(_col, f"LAG(STOCH_EMA{_ratio}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-        for col in output_columns: model_feats[col].append(_col)
-        numeric_feats.append(_col)
+        _lag = createLag(vdf, f"STOCH_EMA{_ratio}", lag)
+        for col in output_columns: model_feats[col].append(_lag)
+        numeric_feats.append(_lag)
 
 
     # https://www.fmlabs.com/reference/default.htm?url=OBV.htm
-    _col = f'LAG_D{lag}_OBV'
+    logging.debug(f"Generating feature 'OBV'")
     vdf.eval("_bv", "CASE WHEN close > LAG_D1_close THEN ABS(volume) WHEN close < LAG_D1_close THEN ABS(volume) * -1 ELSE 0 END")
     vdf.eval("OBV", "LAG(_bv, 1) OVER(PARTITION BY symbol ORDER BY ts) + _bv")
-    vdf.eval(_col, f"LAG(OBV, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-    for col in output_columns: model_feats[col].append(_col)
-    numeric_feats.append(_col)
+    _lag = createLag(vdf, "OBV", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag)
 
     # https://www.fmlabs.com/reference/default.htm?url=DI.htm
+    logging.debug(f"Generating feature 'DI'")
     vdf.eval("_delta_high", "LAG(high, 1) OVER(PARTITION BY symbol ORDER BY ts) - high")
     vdf.eval("_delta_low", "low - LAG(low, 1) OVER(PARTITION BY symbol ORDER BY ts)")
     vdf.eval("_plus_dm", "CASE WHEN ( _delta_high < 0 AND _delta_low < 0 ) OR _delta_high = _delta_low THEN 0 WHEN _delta_high > _delta_low THEN _delta_high ELSE 0 END")
@@ -325,31 +321,67 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     vdf.eval("_minus_dm_sum", f"LAG(_minus_dm, 1) OVER(PARTITION BY symbol ORDER BY ts) - (LAG(_minus_dm, 1) OVER(PARTITION BY symbol ORDER BY ts) / {n}) + _minus_dm")
     vdf.eval("_tr",  "apply_max(ARRAY[ high, LAG_D1_close ]) - apply_min(ARRAY[ low,  LAG_D1_close ])")
     vdf.eval("_tr_sum", f"LAG(_tr, 1) OVER(PARTITION BY symbol ORDER BY ts) - (LAG(_tr, 1) OVER(PARTITION BY symbol ORDER BY ts) / {n}) + _tr")
-    vdf.eval("_tr_sum_safe", "CASE WHEN _tr_sum = 0 THEN Null ELSE _tr_sum END")
-    vdf["_tr_sum_safe"].fillna(method="ffill", by=["symbol"], order_by=["ts"])
-    vdf.eval("pDI",  "100 * (_plus_dm_sum / _tr_sum_safe)")
-    vdf.eval("mDI",  "100 * (_minus_dm_sum / _tr_sum_safe)")
+    #vdf.eval("_tr_sum_safe", "CASE WHEN _tr_sum = 0 THEN Null ELSE _tr_sum END")
+    #vdf["_tr_sum_safe"].fillna(method="ffill", by=["symbol"], order_by=["ts"])
+    vdf.eval("pDI",  "CASE WHEN _tr_sum = 0 THEN 0 ELSE (100 * (_plus_dm_sum / _tr_sum)) END")
+    vdf.eval("mDI",  "CASE WHEN _tr_sum = 0 THEN 0 ELSE (100 * (_minus_dm_sum / _tr_sum)) END")
     # https://www.fmlabs.com/reference/default.htm?url=DX.htm
-    vdf.eval("DX",  "(pDI - mDI) / (pDI + mDI)")
+    logging.debug(f"Generating feature 'DX'")
+    vdf.eval("DX",  "CASE WHEN (pDI + mDI) = 0 THEN 0 ELSE ((pDI - mDI) / (pDI + mDI)) END")
+    _lag = createLag(vdf, "DX", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag)
     # https://www.fmlabs.com/reference/default.htm?url=ADX.htm
+    logging.debug(f"Generating feature 'ADX'")
     vdf.eval("ADX", f"AVG(DX) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
-    _col = f'LAG_D{lag}_ADX'
-    vdf.eval(_col, f"LAG(ADX, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-    for col in output_columns: model_feats[col].append(_col)
-    numeric_feats.append(_col)
+    _lag = createLag(vdf, "ADX", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag)
     # https://www.fmlabs.com/reference/default.htm?url=ADXR.htm
+    logging.debug(f"Generating feature 'ADXR'")
     vdf.eval("ADXR", f"apply_avg(ARRAY[ ADX, LAG(ADX, {n}) OVER(PARTITION BY symbol ORDER BY ts) ] )")
-    _col = f'LAG_D{lag}_ADXR'
-    vdf.eval(_col, f"LAG(ADXR, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
-    for col in output_columns: model_feats[col].append(_col)
-    numeric_feats.append(_col)
+    _lag = createLag(vdf, "ADXR", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag)
 
 
+    # https://www.marketvolume.com/stocks/bop.asp
+    logging.debug(f"Generating feature 'BOP'")
+    #BOP = SMA of [ (Close - Open) / (High - Low) ]
+    vdf.eval("_bop", f"CASE WHEN (high - low) = 0 THEN 0 ELSE (close - open) / (high - low) END")
+    vdf.eval("BOP", f"AVG(_bop) OVER(PARTITION BY symbol ORDER BY ts RANGE BETWEEN INTERVAL '{n} days' PRECEDING AND CURRENT ROW)")
+    _lag = createLag(vdf, "BOP", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag)
+
+
+    # https://www.investopedia.com/articles/active-trading/031914/how-traders-can-utilize-cci-commodity-channel-index-trade-stock-trends.asp
+    logging.debug(f"Generating feature 'CCI'")
+
+    # https://www.fmlabs.com/reference/default.htm?url=CMO.htm
+    logging.debug(f"Generating feature 'CMO'")
+
+    # https://www.fmlabs.com/reference/default.htm?url=MFI.htm
+    logging.debug(f"Generating feature 'MFI'")
+
+    # https://www.fmlabs.com/reference/default.htm?url=Momentum.htm
+    logging.debug(f"Generating feature 'Momentum'")
     
+    # https://www.fmlabs.com/reference/default.htm?url=DMI.htm
+    logging.debug(f"Generating feature 'DMI'")
 
-    # https://www.fmlabs.com/reference/default.htm?url=DX.htm
+    # https://www.fmlabs.com/reference/default.htm?url=WilliamsR.htm
+    logging.debug(f"Generating feature 'Williams %R'")
 
-    # https://www.fmlabs.com/reference/default.htm?url=ADX.htm    
+    # https://www.fmlabs.com/reference/default.htm?url=ATR.htm
+    logging.debug(f"Generating feature 'ATR'")
+
+    # https://www.investopedia.com/terms/a/aroon.asp
+    logging.debug(f"Generating feature 'AROON'")
+
+    # https://www.fmlabs.com/reference/default.htm?url=ChaikinVolatility.htm
+    # https://www.fmlabs.com/reference/default.htm?url=ChaikinMoneyFlow.htm
+    # https://www.fmlabs.com/reference/default.htm?url=ChaikinOscillator.htm
 
 
     # Last step before exporting the data is to normalize the numerical columns and to get the dummies of the different categories.
@@ -378,12 +410,16 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     for col in model_feats:
         all_models_feats += model_feats[col]
     all_models_feats = list(set(all_models_feats))
-    logging.debug(f"all feats: {all_models_feats}")
 
     ## MATERIALIZE
     vdf = vdf.select(key_columns+input_columns+all_models_feats) #[c for c in vdf.get_columns(input_columns) if c.startswith("\"LAG_")])
     vdf.dropna(columns=vdf.get_columns(input_columns))
     return materializeVdf(vdf), model_feats, all_models_feats
+
+def createLag(vdf:vDataFrame, col:str, lag=1):
+    _col = f'LAG_D{lag}_{col}'
+    vdf.eval(_col, f"LAG({col}, {lag}) OVER(PARTITION BY symbol ORDER BY ts)")
+    return _col
 
 def runFeatureDecomposition(vdf, model_columns, out_col):
     pca_model_name = getRelation(f"PCA_{out_col}__{input_table}")
