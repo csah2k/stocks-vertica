@@ -54,7 +54,7 @@ logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(messa
 
 # file:///C:/Users/csah2k/Documents/Work/STOCKS/verticapy.com/examples/movies/index.html
 
-def runProcess(load_data=False, train_models=True, simulate_data=True):
+def runProcess(load_data=True, train_models=True, simulate_data=True):
     logging.info("========= STARTING PROCESS ========")
 
     ### LOAD DATA ###
@@ -344,6 +344,7 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     
     # https://www.fmlabs.com/reference/default.htm?url=WilliamsR.htm
     #logging.debug(f"Generating feature 'Williams %R'")
+    '''
     vdf.eval("WILLR", "100 * ((highest_high - close) / (highest_high - lowest_low))")
     analytics.append("WILLR")
     for ratio in ema_ratios:
@@ -354,10 +355,11 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
         _lag = createLag(vdf, _col, lag)
         for col in output_columns: model_feats[col].append(_lag)
         numeric_feats.append(_lag)
+    '''
 
     # https://www.fmlabs.com/reference/default.htm?url=OBV.htm
     logging.debug(f"Generating feature 'OBV'")
-    vdf.eval("_bv", "CASE WHEN close > LAG_D1_close THEN ABS(volume) WHEN close < LAG_D1_close THEN ABS(volume) * -1 ELSE 0 END")
+    vdf.eval("_bv", "CASE WHEN close > LAG_D1_close THEN ABS(volume) WHEN close < LAG_D1_close THEN ABS(volume) * -1 ELSE volume END")
     vdf.eval("OBV", "LAG(_bv, 1) OVER(PARTITION BY symbol ORDER BY ts) + _bv")
     analytics.append("OBV")
     _lag = createLag(vdf, "OBV", lag)
@@ -438,6 +440,7 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     numeric_feats.append(_lag)
     
     # https://www.fmlabs.com/reference/default.htm?url=ATR.htm
+    '''
     logging.debug(f"Generating feature 'ATR'")
     vdf.eval("TR", "apply_max(ARRAY[ high, LAG_D1_close ]) - apply_min(ARRAY[ low, LAG_D1_close ])")
     vdf.eval("ATR", f"EXPONENTIAL_MOVING_AVERAGE(TR, {1/n}) OVER (PARTITION BY symbol ORDER BY ts)")
@@ -445,21 +448,22 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     _lag = createLag(vdf, "ATR", lag)
     for col in output_columns: model_feats[col].append(_lag)
     numeric_feats.append(_lag)
+    '''
 
     # https://www.fmlabs.com/reference/default.htm?url=ChaikinVolatility.htm
+    '''
     logging.debug(f"Generating feature 'CHKVOL'")
     vdf.eval("UEMAHL", f"EXPONENTIAL_MOVING_AVERAGE(high - low, {1/n}) OVER (PARTITION BY symbol ORDER BY ts)")
-    vdf.eval("EMAHL", "CASE WHEN EMAHL > 0 THEN EMAHL ELSE 1 END")
+    vdf.eval("EMAHL", "CASE WHEN UEMAHL > 0 THEN UEMAHL ELSE 1 END")
     vdf.eval("CHKVOL", f"(EMAHL - LAG(EMAHL, {n}, 0) OVER (PARTITION BY symbol ORDER BY ts)) / (LAG(EMAHL, {n}, 1) OVER (PARTITION BY symbol ORDER BY ts) * 100)")
     analytics.append("CHKVOL")
     _lag = createLag(vdf, "CHKVOL", lag)
     for col in output_columns: model_feats[col].append(_lag)
     numeric_feats.append(_lag)
-
+    '''
     # https://www.fmlabs.com/reference/default.htm?url=ChaikinMoneyFlow.htm
     # https://www.fmlabs.com/reference/default.htm?url=ChaikinOscillator.htm
-
-        # https://www.investopedia.com/terms/a/aroon.asp
+    # https://www.investopedia.com/terms/a/aroon.asp
     #logging.debug(f"Generating feature 'AROON'")
 
 
