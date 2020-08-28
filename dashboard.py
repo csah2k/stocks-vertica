@@ -22,7 +22,7 @@ server_host = '0.0.0.0'
 server_port = 8050
 server_workers = 5
 
-conn_info = {'host': '192.168.1.230',
+conn_info = {'host': '192.168.1.180',
             'port': 5433,
             'user': 'dbadmin',
             'password': 'stocks',
@@ -34,7 +34,7 @@ input_table = "daily_prices"
 input_columns = ["open", "close", "high", "low", "volume"]
 output_columns = ["open", "close", "high", "low", "volume"]
 
-new_auto_connection(conn_info, method = "vertica_python", name = "VerticaDSN")
+new_auto_connection(conn_info, name = "VerticaDSN")
 change_auto_connection("VerticaDSN")
 
 vertica_connection = vertica_python.connect(**conn_info)
