@@ -40,11 +40,38 @@ vertica_connection = vertica_python.connect(**conn_info)
 #vert_cur = vertica_connection.cursor()
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
+logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', datefmt='%I:%M:%S', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
 
-logging.info("========= STARTING PROCESS ========")
+logging.info("========= TESTING ========")
 
-vdf = vDataFrame("stocks.daily_prices__default_prediction")
-vdf.plot('ts', ['pred_close', 'close'], "2020-06-01")
+#vdf = vDataFrame("stocks.daily_prices__default_prediction")
+#vdf.plot('ts', ['pred_close', 'close'], "2020-06-01")
+
+'''
+=== AMPLOS ===
+^BVSP
+^IVBX
+IBXX.SA
+IBRA.SA
+MLCX.SA
+SMLL.SA
+IDIV.SA
+
+=== ENERGIA ELETRICA ===
+^IEE
+
+=== INDUSTRIAA ==
+INDX.SA
+
+'''
+df = web.DataReader(
+        '^IEE',
+        'yahoo',
+        '2020-06-01',
+        dt.now()
+    )
+
+
+print(df)
 
 # %%

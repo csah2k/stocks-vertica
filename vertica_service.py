@@ -1,5 +1,5 @@
 # %%
-# pip3 install vertica-python verticapy holidays pandas_datareader
+# pip3 install vertica-python verticapy holidays pandas_datareader 
 import time
 import logging
 import datetime
@@ -34,7 +34,7 @@ db_schema = "stocks"
 input_table = "daily_prices"
 key_columns = ["ts", "symbol"]
 input_columns = ["open", "close", "high", "low", "volume"]
-output_columns = [ "close", "open",  "high", "low"] #  "volume"]
+output_columns = [ "close" ] # "open",  "high", "low", "volume"]
 
 pca_models = {}
 enet_models = {}
@@ -46,15 +46,17 @@ vertica_connection = vertica_python.connect(**conn_info)
 #vert_cur = vertica_connection.cursor()
 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
+#logging.basicConfig(format='%(asctime)s (%(threadName)s) %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
+logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', datefmt='%I:%M:%S', level=logging.INFO, handlers=[logging.FileHandler(logfile, 'w', 'utf-8')])
 
 # https://towardsdatascience.com/machine-learning-techniques-applied-to-stock-price-prediction-6c1994da8001
 # https://link.springer.com/article/10.1186/s40854-019-0137-1
 # https://iceecs2018.org/wp-content/uploads/2019/10/paper_113.pdf
-
 # file:///C:/Users/csah2k/Documents/Work/STOCKS/verticapy.com/examples/movies/index.html
 
-def runProcess(load_data=True, train_models=True, simulate_data=True):
+# https://www.bussoladoinvestidor.com.br/indices-bovespa/
+
+def runProcess(load_data=False, train_models=True, simulate_data=True):
     logging.info("========= STARTING PROCESS ========")
 
     ### LOAD DATA ###
@@ -173,6 +175,7 @@ def materializeVdf(vdf, tmp='None', target_symbol='', usecols=[]):
     dropTable(prev_tmp)
     return tmp
 
+
 def generateFeatures(vdf, n=20, m=2.0, lag=1):
     # n : Number of days in smoothing period (typically 20)
     # m : Number of standard deviations (typically 2)
@@ -192,6 +195,19 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     model_feats = {}
     for col in input_columns:
         model_feats[col] = []
+
+    # INDICES (self-joins)
+    '''
+    logging.debug("Generating feature 'Index: '")
+    idxVdf = createIndexDataframe().filter("symbol = 'IBXX.SA'")
+    vdf = vdf.join(idxVdf, how="left", on={"ts":"ts"}, expr2=["close as IBXX"])
+    vdf.fillna()
+    _lag = createLag(vdf, "IBXX", lag)
+    for col in output_columns: model_feats[col].append(_lag)
+    numeric_feats.append(_lag)
+    print(vdf)
+    input("PAUSE")
+    '''
     
     # DAY AVERAGE
     logging.debug("Generating feature 'Typical price'")
@@ -214,15 +230,14 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     for col in output_columns:
         for i in range(1, max_lags):
             _lag = createLag(vdf, col, i)
+            model_feats[col].append(_lag)
         if lag not in range(1, max_lags): ## assure main lag existence
             _lag = createLag(vdf, col, lag)
+            model_feats[col].append(_lag)
         if n not in range(1, max_lags): ## assure lag N existence
             _lag = createLag(vdf, col, n)
-        if col in price_cols:
-            for _col in price_cols:
-                model_feats[_col].append(_lag)
-        else:
             model_feats[col].append(_lag)
+        
 
     # https://wiki.timetotrade.com/Candlestick_Tail_Size
     logging.debug(f"Generating features 'Candlestick'")
@@ -344,7 +359,6 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     
     # https://www.fmlabs.com/reference/default.htm?url=WilliamsR.htm
     #logging.debug(f"Generating feature 'Williams %R'")
-    '''
     vdf.eval("WILLR", "100 * ((highest_high - close) / (highest_high - lowest_low))")
     analytics.append("WILLR")
     for ratio in ema_ratios:
@@ -355,7 +369,6 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
         _lag = createLag(vdf, _col, lag)
         for col in output_columns: model_feats[col].append(_lag)
         numeric_feats.append(_lag)
-    '''
 
     # https://www.fmlabs.com/reference/default.htm?url=OBV.htm
     logging.debug(f"Generating feature 'OBV'")
@@ -440,7 +453,6 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     numeric_feats.append(_lag)
     
     # https://www.fmlabs.com/reference/default.htm?url=ATR.htm
-    '''
     logging.debug(f"Generating feature 'ATR'")
     vdf.eval("TR", "apply_max(ARRAY[ high, LAG_D1_close ]) - apply_min(ARRAY[ low, LAG_D1_close ])")
     vdf.eval("ATR", f"EXPONENTIAL_MOVING_AVERAGE(TR, {1/n}) OVER (PARTITION BY symbol ORDER BY ts)")
@@ -448,10 +460,8 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     _lag = createLag(vdf, "ATR", lag)
     for col in output_columns: model_feats[col].append(_lag)
     numeric_feats.append(_lag)
-    '''
 
     # https://www.fmlabs.com/reference/default.htm?url=ChaikinVolatility.htm
-    '''
     logging.debug(f"Generating feature 'CHKVOL'")
     vdf.eval("UEMAHL", f"EXPONENTIAL_MOVING_AVERAGE(high - low, {1/n}) OVER (PARTITION BY symbol ORDER BY ts)")
     vdf.eval("EMAHL", "CASE WHEN UEMAHL > 0 THEN UEMAHL ELSE 1 END")
@@ -460,7 +470,7 @@ def generateFeatures(vdf, n=20, m=2.0, lag=1):
     _lag = createLag(vdf, "CHKVOL", lag)
     for col in output_columns: model_feats[col].append(_lag)
     numeric_feats.append(_lag)
-    '''
+
     # https://www.fmlabs.com/reference/default.htm?url=ChaikinMoneyFlow.htm
     # https://www.fmlabs.com/reference/default.htm?url=ChaikinOscillator.htm
     # https://www.investopedia.com/terms/a/aroon.asp
@@ -533,7 +543,7 @@ def runFeatureDecomposition(vdf, model_columns, out_col):
 def trainModels(inpt_table=input_table):
     ## =========================================== ###
     inpt_table = getRelation(inpt_table)
-    max_iterations = 1000
+    max_iterations = 50000
 
     logging.info(f"Training new models ...")
     training_vdf, models_feats, all_models_feats = createTrainingDataFrame()
@@ -560,83 +570,6 @@ def trainModels(inpt_table=input_table):
         enet_models[out_col] = model
 
     return training_vdf, models_feats
-    
-def createTrainingDataFrame():
-    logging.info("Preparing the training data...")
-    input_columns = ["close", "open", "high", "low", "volume"]
-
-    vdf = vDataFrame(getRelation(input_table)).asfreq('ts', '1 day', {
-        'volume' : 'ffill',
-        'close' : 'ffill',
-        'open' : 'ffill',
-        'high' : 'ffill',
-        'low' : 'ffill'
-        }, by=['symbol'])
-
-    if vdf.empty():
-        logging.warning("No data points!")
-        return vdf, {}, []
-
-    vdf_existing_cols = [str(c).replace('"','') for c in vdf.get_columns()]
-    input_columns = [c for c in input_columns if c in vdf_existing_cols]
-
-    # create all needed lag columns for weeks and months analysis
-    #print(vdf)
-    tmp, models_feats, all_models_feats, _ = generateFeatures(vdf)
-
-    vdf.dropna(all_models_feats)
-    # normalize only model columns
-    #model_columns = vdf.get_columns(key_columns+input_columns)
-    #model_columns = [str(c).replace('"','') for c in model_columns]
-    #model_columns = [c for c in model_columns if c.startswith("LAG_")]
-    #vdf.dropna(model_columns)
-    #vdf.normalize(columns = [c for c in model_columns if c.find("volume")>0 ], method = "minmax")
-    #vdf.normalize(columns = model_columns, method = "minmax")
-    vdf_final_columns = key_columns+input_columns+all_models_feats
-
-    # create a index
-    #vdf.sort(key_columns).eval("idx", "ROW_NUMBER() OVER ()")
-
-    # save vdf to database, as a table
-    new_vdf_relation = dropTable(f"{input_table}__training")
-    #vdf.to_db(new_vdf_relation, usecols=["idx"]+vdf_final_columns, relation_type="table", inplace=True)
-    vdf.to_db(new_vdf_relation, usecols=vdf_final_columns, relation_type="table", inplace=True)
-    logging.info(f"Dataframe saved as: {new_vdf_relation}")
-    dropTable(tmp)
-
-    return vdf, models_feats, all_models_feats
-
-def createSimulationDataFrame(simulation_name='default', inpt_table=input_table):
-    logging.info(f"Creating simulation dataframe...")
-    inpt_table = getRelation(inpt_table)
-    simulation_table = dropTable(f"{input_table}__{simulation_name}_simulation")
-
-    # generate next data points
-    from_day = getDbLastTimestamp(table_name=inpt_table)
-    next_day = next_business_day(from_day.date())
-    #to_day = next_holiday_day(next_day) - datetime.timedelta(days=1)
-    logging.info(f"Simulation: {from_day} -> {next_day} , input: {inpt_table}, output: {simulation_table}")
-    new_data_points = vdf_from_relation(f"(select distinct '{next_day}'::TIMESTAMP ts, symbol, Null::NUMERIC open, Null::NUMERIC high, Null::NUMERIC low, Null::NUMERIC close, Null::NUMERIC volume from {inpt_table}) new_points")
-    #print(new_data_points)
-
-    ## merge the historic data with the simulated points
-    vdf = vDataFrame(getRelation(input_table)).filter(f"ts >= ADD_MONTHS('{from_day}', -24)::TIMESTAMP").append(new_data_points).asfreq('ts', '1 day', {
-        'volume' : 'ffill',
-        'close' : 'ffill',
-        'open' : 'ffill',
-        'high' : 'ffill',
-        'low' : 'ffill'
-        }, by=['symbol']).sort(key_columns)#.eval("idx", "ROW_NUMBER() OVER ()")
-
-    ## MATERIALIZE
-    vdf.to_db(simulation_table, relation_type="table", inplace=True)
-    vdf.sort({"symbol":"desc", "ts": "desc"})
-    
-    # TODO create projections in simulation_table
-    logging.info(f"Simulation Dataframe saved as: {simulation_table}")
-
-    return vdf, simulation_table, next_day
-
 
 def simulateNextDay(simulation_name='default'):
     logging.info(f"========= Running simulation '{simulation_name}' ========= ")
@@ -665,7 +598,7 @@ def simulateNextDay(simulation_name='default'):
         #logging.info(f"Predicted value of '{out_col}': {pred_value}")
     #vdf = vdf.select(key_columns+input_columns+predicted_cols)
     #print(vdf)
-    simul_res_table = dropTable(f"{input_table}__{simulation_name}_prediction")
+    simul_res_table = dropTable(f"{input_table}__analysis")
     vdf.to_db(simul_res_table, usecols=key_columns+input_columns+analytics+predicted_cols, relation_type="table", inplace=True)
 
     #vdf.plot('ts', ['close', 'pred_close'])
@@ -686,6 +619,93 @@ def simulateNextDay(simulation_name='default'):
     '''
     
     return next_day
+
+def createIndexDataframe():
+    return vDataFrame(getRelation()).filter("symbol in (select symbol from stocks.stock_symbols where industry = 'index')").asfreq('ts', '1 day', {
+        'volume' : 'ffill',
+        'close' : 'ffill',
+        'open' : 'ffill',
+        'high' : 'ffill',
+        'low' : 'ffill'
+        }, by=['symbol'])
+
+def createTrainingDataFrame():
+    logging.info("Preparing the training data...")    
+
+    predicate = "symbol in (select symbol from stocks.stock_symbols where industry != 'index')"
+    vdf = vDataFrame(getRelation(input_table)).filter(predicate).asfreq('ts', '1 day', {
+        'volume' : 'ffill',
+        'close' : 'ffill',
+        'open' : 'ffill',
+        'high' : 'ffill',
+        'low' : 'ffill'
+        }, by=['symbol'])
+
+    if vdf.empty():
+        logging.warning("No data points!")
+        return vdf, {}, []
+
+    vdf_existing_cols = [str(c).replace('"','') for c in vdf.get_columns()]
+    inpt_columns = [c for c in input_columns if c in vdf_existing_cols]
+
+    # create all needed lag columns for weeks and months analysis
+    #print(vdf)
+    tmp, models_feats, all_models_feats, _ = generateFeatures(vdf)
+
+    vdf.dropna(all_models_feats)
+    # normalize only model columns
+    #model_columns = vdf.get_columns(key_columns+input_columns)
+    #model_columns = [str(c).replace('"','') for c in model_columns]
+    #model_columns = [c for c in model_columns if c.startswith("LAG_")]
+    #vdf.dropna(model_columns)
+    #vdf.normalize(columns = [c for c in model_columns if c.find("volume")>0 ], method = "minmax")
+    #vdf.normalize(columns = model_columns, method = "minmax")
+    vdf_final_columns = key_columns+inpt_columns+all_models_feats
+
+    # create a index
+    #vdf.sort(key_columns).eval("idx", "ROW_NUMBER() OVER ()")
+
+    # save vdf to database, as a table
+    new_vdf_relation = dropTable(f"{input_table}__training")
+    #vdf.to_db(new_vdf_relation, usecols=["idx"]+vdf_final_columns, relation_type="table", inplace=True)
+    vdf.to_db(new_vdf_relation, usecols=vdf_final_columns, relation_type="table", inplace=True)
+    logging.info(f"Dataframe saved as: {new_vdf_relation}")
+    dropTable(tmp)
+
+    return vdf, models_feats, all_models_feats
+
+def createSimulationDataFrame(simulation_name='default', inpt_table=input_table):
+    logging.info(f"Creating simulation dataframe...")
+    inpt_table = getRelation(inpt_table)
+    simulation_table = dropTable(f"{input_table}__{simulation_name}_simulation")
+
+    # generate next data points
+    from_day = getDbLastTimestamp(table_name=inpt_table)
+    next_day = next_business_day(from_day.date())
+    #to_day = next_holiday_day(next_day) - datetime.timedelta(days=1)
+    logging.info(f"Simulation: {from_day} -> {next_day} , input: {inpt_table}, output: {simulation_table}")
+    new_data_points = vdf_from_relation(f"(select distinct '{next_day}'::TIMESTAMP ts, symbol, Null::NUMERIC open, Null::NUMERIC high, Null::NUMERIC low, Null::NUMERIC close, Null::NUMERIC volume from {inpt_table}) new_points")
+    #print(new_data_points)
+
+    ## merge the historic data with the simulated points
+    predicates = ["symbol in (select symbol from stocks.stock_symbols where industry != 'index')", f"ts >= ADD_MONTHS('{from_day}', -24)::TIMESTAMP"]
+    vdf = vDataFrame(getRelation(input_table)).filter(conditions=predicates).append(new_data_points).asfreq('ts', '1 day', {
+        'volume' : 'ffill',
+        'close' : 'ffill',
+        'open' : 'ffill',
+        'high' : 'ffill',
+        'low' : 'ffill'
+        }, by=['symbol']).sort(key_columns)#.eval("idx", "ROW_NUMBER() OVER ()")
+
+    ## MATERIALIZE
+    vdf.to_db(simulation_table, relation_type="table", inplace=True)
+    vdf.sort({"symbol":"desc", "ts": "desc"})
+    
+    # TODO create projections in simulation_table
+    logging.info(f"Simulation Dataframe saved as: {simulation_table}")
+
+    return vdf, simulation_table, next_day
+
 
 
 
